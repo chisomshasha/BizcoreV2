@@ -1,0 +1,27 @@
+# BizCore Backend — Production Requirements
+# Trimmed to packages actually imported by server.py
+# Reduces Railway build time from ~4 min to ~60 sec
+
+fastapi==0.110.1
+uvicorn==0.25.0
+starlette==0.37.2
+
+# Database
+motor==3.3.1
+pymongo==4.5.0
+dnspython==2.8.0
+
+# Config & validation
+python-dotenv==1.2.1
+pydantic==2.12.5
+pydantic[email]==2.12.5
+email-validator==2.3.0
+
+# HTTP client (Google OAuth token exchange)
+httpx==0.28.1
+
+# PDF generation (invoices + reports)
+reportlab==4.2.2
+
+# Utilities
+python-multipart==0.0.22
