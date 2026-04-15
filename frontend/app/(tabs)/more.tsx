@@ -33,6 +33,7 @@ export default function MoreScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { user, logout } = useAuthStore();
+  const isSuperAdmin = user?.role === 'super_admin';
   const { warehouses, fetchWarehouses, createWarehouse, deleteWarehouse } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [showWarehouseModal, setShowWarehouseModal] = useState(false);
@@ -213,6 +214,14 @@ export default function MoreScreen() {
             leftIcon="time-outline"
             onPress={() => router.push('/audit-logs')}
           />
+          {isSuperAdmin && (
+            <ListItem
+              title="Role Permissions"
+              subtitle="Configure CRUD access per role"
+              leftIcon="shield-checkmark-outline"
+              onPress={() => router.push('/role-permissions')}
+            />
+          )}
         </View>
 
         {/* Sales & Purchases */}
