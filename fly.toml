@@ -1,11 +1,11 @@
-app = "se-q-app8"                    # ← CHANGE: choose a unique name (lowercase, hyphens only)
-primary_region = "ams"               # ← CHANGE: pick the closest region to your users (e.g. ams, ord, syd, fra)
+app = "bizcore-v2"                    # ← CHANGE this to something unique and lowercase (hyphens allowed)
+primary_region = "ams"                # ← Change to your closest region (ams, ord, fra, syd, etc.)
 
 [build]
   dockerfile = "Dockerfile"
 
 [[services]]
-  internal_port = 8080
+  internal_port = 8080                # Must match what your CMD listens on
   protocol = "tcp"
 
   [[services.ports]]
@@ -16,18 +16,11 @@ primary_region = "ams"               # ← CHANGE: pick the closest region to yo
     port = 443
     handlers = ["tls", "http"]
 
-  # Health check (matches your old Railway config)
+  # Health check
   [[services.http_checks]]
     interval = "30s"
     grace_period = "30s"
     method = "get"
-    path = "/"
+    path = "/"                        # Change if your root endpoint is different (e.g. /health)
     protocol = "http"
     timeout = "10s"
-    tls_skip_verify = false
-
-# Optional: persistent storage for /app/uploads (photos + videos)
-# Uncomment the lines below AFTER you create the volume (see step 5)
-# [[mounts]]
-#   source = "uploads"
-#   destination = "/app/uploads"
