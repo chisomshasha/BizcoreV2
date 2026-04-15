@@ -1,12 +1,9 @@
-# fly.toml app configuration file generated for bizcorev2 on 2026-04-15T13:35:13Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
+# fly.toml for BizCore_V2 on Fly.io
 app = 'bizcorev2'
 primary_region = 'ams'
 
 [build]
+  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080
@@ -16,30 +13,19 @@ primary_region = 'ams'
   min_machines_running = 0
   processes = ['app']
 
+  # Health check – very important for FastAPI startup
+  [[http_service.checks]]
+    interval = "30s"
+    grace_period = "90s"          # Increased – gives your app more time to start
+    method = "get"
+    path = "/"                    # Try "/docs" or "/health" if "/" returns 404
+    protocol = "http"
+    timeout = "15s"
+
+[env]
+  # You can add default env vars here if needed (but secrets are better via fly secrets set)
+
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 1024
-
-  [[services]]
-  internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
-  # Improved health check for FastAPI (gives more time to start)
-  [[services.http_checks]]
-    interval = "30s"
-    grace_period = "60s"          # Increased from 30s → very important for startup
-    method = "get"
-    path = "/"                    # Change to "/docs" or "/health" if your root returns error
-    protocol = "http"
-    timeout = "10s"
-    tls_skip_verify = false
