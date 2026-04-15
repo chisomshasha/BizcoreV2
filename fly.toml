@@ -1,0 +1,33 @@
+app = "se-q-app8"                    # ← CHANGE: choose a unique name (lowercase, hyphens only)
+primary_region = "ams"               # ← CHANGE: pick the closest region to your users (e.g. ams, ord, syd, fra)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  # Health check (matches your old Railway config)
+  [[services.http_checks]]
+    interval = "30s"
+    grace_period = "30s"
+    method = "get"
+    path = "/"
+    protocol = "http"
+    timeout = "10s"
+    tls_skip_verify = false
+
+# Optional: persistent storage for /app/uploads (photos + videos)
+# Uncomment the lines below AFTER you create the volume (see step 5)
+# [[mounts]]
+#   source = "uploads"
+#   destination = "/app/uploads"
