@@ -2,27 +2,27 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies (ffmpeg for any video features if needed, though not visible in this tree)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies first (better layer caching)
+# Copy and install Python dependencies first (caching)
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
-COPY backend/server.py ./server.py
-COPY backend/server_auth_patch.py ./server_auth_patch.py
+# Copy the entire backend folder (this fixes the missing 'permissions' and any other modules)
+COPY backend/ ./backend/
 
-# Create directories for any file uploads (if your app uses them)
+# Create uploads folder if your app needs it
 RUN mkdir -p uploads
 
-# Fly.io convention: listen on port 8080 internally
 EXPOSE 8080
 
-# Production-ready command
-# Uses ${PORT:-8080} so it respects Fly.io's $PORT while having a safe default
+# Run from the backend folder so relative imports work correctly
+WORKDIR /app/backend
+
+# Important: uvicorn looks for server:app inside the current working directory
 CMD uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} \
     --timeout-keep-alive 300 \
     --limit-max-requests 1000
