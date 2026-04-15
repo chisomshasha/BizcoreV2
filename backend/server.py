@@ -30,6 +30,15 @@ except ImportError:
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# Dynamic permission system
+from permissions import (
+    get_role_permissions, check_permission, assert_permission,
+    invalidate_cache, seed_default_permissions,
+    RolePermissionDoc, PermissionUpdateRequest,
+    MODULES, MODULE_LABELS, CRUDPermission, DEFAULT_PERMISSIONS,
+    ALWAYS_FULL_ACCESS_ROLES, ALWAYS_READ_ROLES,
+)
+
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -999,6 +1008,7 @@ async def logout(request: Request, response: Response):
 @api_router.get("/users", response_model=List[User])
 async def get_users(user: User = Depends(get_current_user)):
     """Get all users (admin only)"""
+    await assert_permission(db, user.role, "users", "read")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
                           UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -1057,6 +1067,7 @@ async def create_user(user_data: UserCreate, current_user: User = Depends(get_cu
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, update: UserUpdate, user: User = Depends(get_current_user)):
     """Update user"""
+    await assert_permission(db, user.role, "users", "update")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
                           UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -1173,9 +1184,7 @@ async def get_warehouses(user: User = Depends(get_current_user)):
 @api_router.post("/warehouses", response_model=Warehouse)
 async def create_warehouse(warehouse: WarehouseCreate, user: User = Depends(get_current_user)):
     """Create a warehouse"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
+    await assert_permission(db, user.role, "warehouses", "create")
     new_warehouse = Warehouse(**warehouse.model_dump())
     await db.warehouses.insert_one(new_warehouse.model_dump())
     return new_warehouse
@@ -1183,9 +1192,7 @@ async def create_warehouse(warehouse: WarehouseCreate, user: User = Depends(get_
 @api_router.put("/warehouses/{warehouse_id}", response_model=Warehouse)
 async def update_warehouse(warehouse_id: str, warehouse: WarehouseCreate, user: User = Depends(get_current_user)):
     """Update a warehouse"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
+    await assert_permission(db, user.role, "warehouses", "update")
     await db.warehouses.update_one(
         {"warehouse_id": warehouse_id},
         {"$set": warehouse.model_dump()}
@@ -1198,9 +1205,7 @@ async def update_warehouse(warehouse_id: str, warehouse: WarehouseCreate, user: 
 @api_router.delete("/warehouses/{warehouse_id}")
 async def delete_warehouse(warehouse_id: str, user: User = Depends(get_current_user)):
     """Delete a warehouse (soft delete)"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
+    await assert_permission(db, user.role, "warehouses", "delete")
     await db.warehouses.update_one(
         {"warehouse_id": warehouse_id},
         {"$set": {"is_active": False}}
@@ -1219,6 +1224,7 @@ async def get_products(
     user: User = Depends(get_current_user)
 ):
     """Get all products with optional filters"""
+    await assert_permission(db, user.role, "products", "read")
     query = {"is_active": True}
     if category:
         query["category"] = category.value
@@ -1242,6 +1248,7 @@ async def is_low_stock(product_id: str, reorder_level: int) -> bool:
 @api_router.get("/products/{product_id}", response_model=Product)
 async def get_product(product_id: str, user: User = Depends(get_current_user)):
     """Get a single product"""
+    await assert_permission(db, user.role, "products", "read")
     product = await db.products.find_one({"product_id": product_id}, {"_id": 0})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -1250,6 +1257,7 @@ async def get_product(product_id: str, user: User = Depends(get_current_user)):
 @api_router.post("/products", response_model=Product)
 async def create_product(product: ProductCreate, user: User = Depends(get_current_user)):
     """Create a product"""
+    await assert_permission(db, user.role, "products", "create")
     existing = await db.products.find_one({"sku": product.sku}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="SKU already exists")
@@ -1261,6 +1269,7 @@ async def create_product(product: ProductCreate, user: User = Depends(get_curren
 @api_router.put("/products/{product_id}", response_model=Product)
 async def update_product(product_id: str, update: ProductUpdate, user: User = Depends(get_current_user)):
     """Update a product"""
+    await assert_permission(db, user.role, "products", "update")
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if update_data:
         update_data["updated_at"] = datetime.now(timezone.utc)
@@ -1274,6 +1283,7 @@ async def update_product(product_id: str, update: ProductUpdate, user: User = De
 @api_router.delete("/products/{product_id}")
 async def delete_product(product_id: str, user: User = Depends(get_current_user)):
     """Delete a product (soft delete)"""
+    await assert_permission(db, user.role, "products", "delete")
     await db.products.update_one(
         {"product_id": product_id},
         {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
@@ -1291,6 +1301,7 @@ async def get_inventory(
     user: User = Depends(get_current_user)
 ):
     """Get inventory stock levels"""
+    await assert_permission(db, user.role, "inventory", "read")
     query = {}
     if warehouse_id:
         query["warehouse_id"] = warehouse_id
@@ -1316,6 +1327,7 @@ async def get_inventory(
 @api_router.post("/inventory/adjust")
 async def adjust_inventory(adjustment: StockTransactionCreate, user: User = Depends(get_current_user)):
     """Adjust inventory (damage, return, conversion)"""
+    await assert_permission(db, user.role, "inventory", "update")
     # Find or create stock record
     stock = await db.inventory_stock.find_one({
         "product_id": adjustment.product_id,
@@ -1389,12 +1401,14 @@ async def get_low_stock_items(user: User = Depends(get_current_user)):
 @api_router.get("/suppliers", response_model=List[Supplier])
 async def get_suppliers(user: User = Depends(get_current_user)):
     """Get all suppliers"""
+    await assert_permission(db, user.role, "suppliers", "read")
     suppliers = await db.suppliers.find({"is_active": True}, {"_id": 0}).to_list(1000)
     return [Supplier(**s) for s in suppliers]
 
 @api_router.get("/suppliers/{supplier_id}", response_model=Supplier)
 async def get_supplier(supplier_id: str, user: User = Depends(get_current_user)):
     """Get a single supplier"""
+    await assert_permission(db, user.role, "suppliers", "read")
     supplier = await db.suppliers.find_one({"supplier_id": supplier_id}, {"_id": 0})
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -1403,6 +1417,7 @@ async def get_supplier(supplier_id: str, user: User = Depends(get_current_user))
 @api_router.post("/suppliers", response_model=Supplier)
 async def create_supplier(supplier: SupplierCreate, user: User = Depends(get_current_user)):
     """Create a supplier"""
+    await assert_permission(db, user.role, "suppliers", "create")
     new_supplier = Supplier(**supplier.model_dump())
     await db.suppliers.insert_one(new_supplier.model_dump())
     return new_supplier
@@ -1410,6 +1425,7 @@ async def create_supplier(supplier: SupplierCreate, user: User = Depends(get_cur
 @api_router.put("/suppliers/{supplier_id}", response_model=Supplier)
 async def update_supplier(supplier_id: str, update: SupplierUpdate, user: User = Depends(get_current_user)):
     """Update a supplier"""
+    await assert_permission(db, user.role, "suppliers", "update")
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if update_data:
         update_data["updated_at"] = datetime.now(timezone.utc)
@@ -1423,6 +1439,7 @@ async def update_supplier(supplier_id: str, update: SupplierUpdate, user: User =
 @api_router.delete("/suppliers/{supplier_id}")
 async def delete_supplier(supplier_id: str, user: User = Depends(get_current_user)):
     """Delete a supplier (soft delete)"""
+    await assert_permission(db, user.role, "suppliers", "delete")
     await db.suppliers.update_one(
         {"supplier_id": supplier_id},
         {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
@@ -1436,12 +1453,14 @@ async def delete_supplier(supplier_id: str, user: User = Depends(get_current_use
 @api_router.get("/distributors", response_model=List[Distributor])
 async def get_distributors(user: User = Depends(get_current_user)):
     """Get all distributors"""
+    await assert_permission(db, user.role, "distributors", "read")
     distributors = await db.distributors.find({"is_active": True}, {"_id": 0}).to_list(1000)
     return [Distributor(**d) for d in distributors]
 
 @api_router.get("/distributors/{distributor_id}", response_model=Distributor)
 async def get_distributor(distributor_id: str, user: User = Depends(get_current_user)):
     """Get a single distributor"""
+    await assert_permission(db, user.role, "distributors", "read")
     distributor = await db.distributors.find_one({"distributor_id": distributor_id}, {"_id": 0})
     if not distributor:
         raise HTTPException(status_code=404, detail="Distributor not found")
@@ -1450,6 +1469,7 @@ async def get_distributor(distributor_id: str, user: User = Depends(get_current_
 @api_router.post("/distributors", response_model=Distributor)
 async def create_distributor(distributor: DistributorCreate, user: User = Depends(get_current_user)):
     """Create a distributor"""
+    await assert_permission(db, user.role, "distributors", "create")
     new_distributor = Distributor(**distributor.model_dump())
     await db.distributors.insert_one(new_distributor.model_dump())
     return new_distributor
@@ -1457,6 +1477,7 @@ async def create_distributor(distributor: DistributorCreate, user: User = Depend
 @api_router.put("/distributors/{distributor_id}", response_model=Distributor)
 async def update_distributor(distributor_id: str, update: DistributorUpdate, user: User = Depends(get_current_user)):
     """Update a distributor"""
+    await assert_permission(db, user.role, "distributors", "update")
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if update_data:
         update_data["updated_at"] = datetime.now(timezone.utc)
@@ -1470,6 +1491,7 @@ async def update_distributor(distributor_id: str, update: DistributorUpdate, use
 @api_router.delete("/distributors/{distributor_id}")
 async def delete_distributor(distributor_id: str, user: User = Depends(get_current_user)):
     """Delete a distributor (soft delete)"""
+    await assert_permission(db, user.role, "distributors", "delete")
     await db.distributors.update_one(
         {"distributor_id": distributor_id},
         {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
@@ -1492,6 +1514,7 @@ async def get_purchase_orders(
     user: User = Depends(get_current_user)
 ):
     """Get all purchase orders"""
+    await assert_permission(db, user.role, "purchase_orders", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -1504,6 +1527,7 @@ async def get_purchase_orders(
 @api_router.get("/purchase-orders/{po_id}")
 async def get_purchase_order(po_id: str, user: User = Depends(get_current_user)):
     """Get a single purchase order"""
+    await assert_permission(db, user.role, "purchase_orders", "read")
     po = await db.purchase_orders.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -1512,6 +1536,7 @@ async def get_purchase_order(po_id: str, user: User = Depends(get_current_user))
 @api_router.post("/purchase-orders")
 async def create_purchase_order(po_data: PurchaseOrderCreate, user: User = Depends(get_current_user)):
     """Create a purchase order"""
+    await assert_permission(db, user.role, "purchase_orders", "create")
     supplier = await db.suppliers.find_one({"supplier_id": po_data.supplier_id}, {"_id": 0})
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -1550,6 +1575,7 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, user: User = Depen
 @api_router.put("/purchase-orders/{po_id}")
 async def update_purchase_order(po_id: str, update: PurchaseOrderUpdate, user: User = Depends(get_current_user)):
     """Update a purchase order"""
+    await assert_permission(db, user.role, "purchase_orders", "update")
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if update_data:
         update_data["updated_at"] = datetime.now(timezone.utc)
@@ -1597,6 +1623,7 @@ async def update_purchase_order(po_id: str, update: PurchaseOrderUpdate, user: U
 @api_router.delete("/purchase-orders/{po_id}")
 async def delete_purchase_order(po_id: str, user: User = Depends(get_current_user)):
     """Cancel a purchase order"""
+    await assert_permission(db, user.role, "purchase_orders", "delete")
     po = await db.purchase_orders.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -1626,6 +1653,7 @@ async def get_sales_orders(
     user: User = Depends(get_current_user)
 ):
     """Get all sales orders"""
+    await assert_permission(db, user.role, "sales_orders", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -1638,6 +1666,7 @@ async def get_sales_orders(
 @api_router.get("/sales-orders/{so_id}")
 async def get_sales_order(so_id: str, user: User = Depends(get_current_user)):
     """Get a single sales order"""
+    await assert_permission(db, user.role, "sales_orders", "read")
     so = await db.sales_orders.find_one({"so_id": so_id}, {"_id": 0})
     if not so:
         raise HTTPException(status_code=404, detail="Sales order not found")
@@ -1646,6 +1675,7 @@ async def get_sales_order(so_id: str, user: User = Depends(get_current_user)):
 @api_router.post("/sales-orders")
 async def create_sales_order(so_data: SalesOrderCreate, user: User = Depends(get_current_user)):
     """Create a sales order"""
+    await assert_permission(db, user.role, "sales_orders", "create")
     distributor = await db.distributors.find_one({"distributor_id": so_data.distributor_id}, {"_id": 0})
     if not distributor:
         raise HTTPException(status_code=404, detail="Distributor not found")
@@ -1684,6 +1714,7 @@ async def create_sales_order(so_data: SalesOrderCreate, user: User = Depends(get
 @api_router.put("/sales-orders/{so_id}")
 async def update_sales_order(so_id: str, update: SalesOrderUpdate, user: User = Depends(get_current_user)):
     """Update a sales order"""
+    await assert_permission(db, user.role, "sales_orders", "update")
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
     if update_data:
         update_data["updated_at"] = datetime.now(timezone.utc)
@@ -1724,6 +1755,7 @@ async def update_sales_order(so_id: str, update: SalesOrderUpdate, user: User = 
 @api_router.delete("/sales-orders/{so_id}")
 async def delete_sales_order(so_id: str, user: User = Depends(get_current_user)):
     """Cancel a sales order"""
+    await assert_permission(db, user.role, "sales_orders", "delete")
     so = await db.sales_orders.find_one({"so_id": so_id}, {"_id": 0})
     if not so:
         raise HTTPException(status_code=404, detail="Sales order not found")
@@ -1754,6 +1786,7 @@ async def get_invoices(
     user: User = Depends(get_current_user)
 ):
     """Get all invoices"""
+    await assert_permission(db, user.role, "invoices", "read")
     query = {}
     if type:
         query["type"] = type.value
@@ -1766,6 +1799,7 @@ async def get_invoices(
 @api_router.get("/invoices/{invoice_id}")
 async def get_invoice(invoice_id: str, user: User = Depends(get_current_user)):
     """Get a single invoice"""
+    await assert_permission(db, user.role, "invoices", "read")
     invoice = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -1774,6 +1808,7 @@ async def get_invoice(invoice_id: str, user: User = Depends(get_current_user)):
 @api_router.post("/invoices")
 async def create_invoice(invoice_data: InvoiceCreate, user: User = Depends(get_current_user)):
     """Create an invoice"""
+    await assert_permission(db, user.role, "invoices", "create")
     # Get party name
     party_name = "Unknown"
     if invoice_data.type == InvoiceType.PURCHASE:
@@ -1805,6 +1840,7 @@ async def create_invoice(invoice_data: InvoiceCreate, user: User = Depends(get_c
 @api_router.get("/payments")
 async def get_payments(invoice_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Get all payments"""
+    await assert_permission(db, user.role, "invoices", "read")
     query = {}
     if invoice_id:
         query["invoice_id"] = invoice_id
@@ -1815,6 +1851,7 @@ async def get_payments(invoice_id: Optional[str] = None, user: User = Depends(ge
 @api_router.post("/payments")
 async def create_payment(payment_data: PaymentCreate, user: User = Depends(get_current_user)):
     """Record a payment"""
+    await assert_permission(db, user.role, "invoices", "create")
     invoice = await db.invoices.find_one({"invoice_id": payment_data.invoice_id}, {"_id": 0})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -1843,6 +1880,7 @@ async def create_payment(payment_data: PaymentCreate, user: User = Depends(get_c
 @api_router.get("/accounts")
 async def get_accounts(type: Optional[AccountType] = None, user: User = Depends(get_current_user)):
     """Get chart of accounts"""
+    await assert_permission(db, user.role, "invoices", "read")
     query = {"is_active": True}
     if type:
         query["type"] = type.value
@@ -2079,6 +2117,7 @@ async def mark_all_notifications_read(user: User = Depends(get_current_user)):
 @api_router.get("/reports/stock-summary")
 async def get_stock_summary_report(warehouse_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Get stock summary report"""
+    await assert_permission(db, user.role, "reports", "read")
     query = {}
     if warehouse_id:
         query["warehouse_id"] = warehouse_id
@@ -2115,6 +2154,7 @@ async def get_purchase_analysis_report(
     user: User = Depends(get_current_user)
 ):
     """Get purchase analysis report"""
+    await assert_permission(db, user.role, "reports", "read")
     query = {}
     if start_date:
         query["order_date"] = {"$gte": datetime.fromisoformat(start_date)}
@@ -2152,6 +2192,7 @@ async def get_sales_analysis_report(
     user: User = Depends(get_current_user)
 ):
     """Get sales analysis report"""
+    await assert_permission(db, user.role, "reports", "read")
     query = {}
     if start_date:
         query["order_date"] = {"$gte": datetime.fromisoformat(start_date)}
@@ -2205,8 +2246,7 @@ async def get_audit_logs(
     user: User = Depends(get_current_user)
 ):
     """Get audit logs (admin only)"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    await assert_permission(db, user.role, "audit_logs", "read")
     
     query = {}
     if entity_type:
@@ -2269,6 +2309,7 @@ async def get_expenses(
     user: User = Depends(get_current_user)
 ):
     """Get expenses — scoped to user's warehouse unless cross-warehouse role"""
+    await assert_permission(db, user.role, "expenses", "read")
     query: Dict[str, Any] = {}
     if category:
         query["category"] = category.value
@@ -2296,6 +2337,7 @@ async def get_expenses(
 @api_router.post("/expenses")
 async def create_expense(expense_data: ExpenseCreate, user: User = Depends(get_current_user)):
     """Create an expense — auto-tagged to user's warehouse"""
+    await assert_permission(db, user.role, "expenses", "create")
     expense_dict = expense_data.model_dump(exclude={"expense_date"})
     expense = Expense(
         **expense_dict,
@@ -2310,8 +2352,7 @@ async def create_expense(expense_data: ExpenseCreate, user: User = Depends(get_c
 @api_router.put("/expenses/{expense_id}/approve")
 async def approve_expense(expense_id: str, user: User = Depends(get_current_user)):
     """Approve an expense (manager/accountant only)"""
-    if user.role not in APPROVAL_ROLES:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    await assert_permission(db, user.role, "expenses", "update")
     expense = await db.expenses.find_one({"expense_id": expense_id}, {"_id": 0})
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -2398,6 +2439,7 @@ async def get_quotations(
     user: User = Depends(get_current_user)
 ):
     """Get all quotations"""
+    await assert_permission(db, user.role, "quotations", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -2410,6 +2452,7 @@ async def get_quotations(
 @api_router.post("/quotations")
 async def create_quotation(qt_data: QuotationCreate, user: User = Depends(get_current_user)):
     """Create a quotation"""
+    await assert_permission(db, user.role, "quotations", "create")
     distributor = await db.distributors.find_one({"distributor_id": qt_data.distributor_id}, {"_id": 0})
     if not distributor:
         raise HTTPException(status_code=404, detail="Distributor not found")
@@ -2570,6 +2613,7 @@ async def get_delivery_notes(
     user: User = Depends(get_current_user)
 ):
     """Get all delivery notes"""
+    await assert_permission(db, user.role, "delivery_notes", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -2582,6 +2626,7 @@ async def get_delivery_notes(
 @api_router.post("/delivery-notes")
 async def create_delivery_note(dn_data: DeliveryNoteCreate, user: User = Depends(get_current_user)):
     """Create a delivery note from sales order"""
+    await assert_permission(db, user.role, "delivery_notes", "create")
     so = await db.sales_orders.find_one({"so_id": dn_data.so_id}, {"_id": 0})
     if not so:
         raise HTTPException(status_code=404, detail="Sales order not found")
@@ -2610,6 +2655,7 @@ async def update_delivery_status(
     user: User = Depends(get_current_user)
 ):
     """Update delivery note status"""
+    await assert_permission(db, user.role, "delivery_notes", "update")
     update_data = {"status": status.value}
     if status == DeliveryStatus.DELIVERED:
         update_data["delivery_date"] = datetime.now(timezone.utc)
@@ -2662,12 +2708,14 @@ class BOMCreate(BaseModel):
 @api_router.get("/bom")
 async def get_all_bom(user: User = Depends(get_current_user)):
     """Get all BOMs"""
+    await assert_permission(db, user.role, "bom", "read")
     boms = await db.bill_of_materials.find({"is_active": True}, {"_id": 0}).to_list(1000)
     return boms
 
 @api_router.get("/bom/{product_id}")
 async def get_bom_for_product(product_id: str, user: User = Depends(get_current_user)):
     """Get BOM for a finished product"""
+    await assert_permission(db, user.role, "bom", "read")
     bom = await db.bill_of_materials.find_one({"finished_product_id": product_id, "is_active": True}, {"_id": 0})
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
@@ -2676,6 +2724,7 @@ async def get_bom_for_product(product_id: str, user: User = Depends(get_current_
 @api_router.post("/bom")
 async def create_bom(bom_data: BOMCreate, user: User = Depends(get_current_user)):
     """Create a BOM for a finished product"""
+    await assert_permission(db, user.role, "bom", "create")
     # Verify finished product exists and is finished category
     finished = await db.products.find_one({"product_id": bom_data.finished_product_id}, {"_id": 0})
     if not finished:
@@ -2722,6 +2771,7 @@ async def produce_from_bom(
     user: User = Depends(get_current_user)
 ):
     """Produce finished goods from raw materials using BOM"""
+    await assert_permission(db, user.role, "bom", "update")
     bom = await db.bill_of_materials.find_one({"bom_id": bom_id, "is_active": True}, {"_id": 0})
     if not bom:
         raise HTTPException(status_code=404, detail="BOM not found")
@@ -2809,6 +2859,7 @@ async def get_profit_loss_report(
     user: User = Depends(get_current_user)
 ):
     """Get Profit & Loss report"""
+    await assert_permission(db, user.role, "reports", "read")
     # Default to current month
     if not start_date:
         start_date = datetime.now(timezone.utc).replace(day=1).isoformat()
@@ -2877,6 +2928,7 @@ async def get_cash_flow_report(
     user: User = Depends(get_current_user)
 ):
     """Get Cash Flow report"""
+    await assert_permission(db, user.role, "reports", "read")
     if not start_date:
         start_date = datetime.now(timezone.utc).replace(day=1).isoformat()
     if not end_date:
@@ -2952,6 +3004,7 @@ async def get_cash_flow_report(
 @api_router.get("/reports/supplier-aging")
 async def get_supplier_aging_report(user: User = Depends(get_current_user)):
     """Get Supplier Aging (Accounts Payable) report"""
+    await assert_permission(db, user.role, "reports", "read")
     today = datetime.now(timezone.utc)
     
     # Get unpaid purchase invoices
@@ -3026,6 +3079,7 @@ async def get_supplier_aging_report(user: User = Depends(get_current_user)):
 @api_router.get("/reports/customer-aging")
 async def get_customer_aging_report(user: User = Depends(get_current_user)):
     """Get Customer Aging (Accounts Receivable) report"""
+    await assert_permission(db, user.role, "reports", "read")
     today = datetime.now(timezone.utc)
     
     # Get unpaid sales invoices
@@ -3106,6 +3160,7 @@ async def get_inventory_valuation_report(
     user: User = Depends(get_current_user)
 ):
     """Get Inventory Valuation report"""
+    await assert_permission(db, user.role, "reports", "read")
     query = {}
     if warehouse_id:
         query["warehouse_id"] = warehouse_id
@@ -3782,6 +3837,7 @@ async def list_requisitions(
     user: User = Depends(get_current_user)
 ):
     """List all purchase requisitions"""
+    await assert_permission(db, user.role, "requisitions", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -3802,6 +3858,7 @@ async def get_requisition(requisition_id: str, user: User = Depends(get_current_
 @api_router.post("/requisitions")
 async def create_requisition(data: PurchaseRequisitionCreate, user: User = Depends(get_current_user)):
     """Create a new purchase requisition"""
+    await assert_permission(db, user.role, "requisitions", "create")
     # Generate requisition number
     count = await db.requisitions.count_documents({})
     req_number = f"REQ-{datetime.now().strftime('%Y%m')}-{str(count + 1).zfill(4)}"
@@ -3858,7 +3915,8 @@ async def submit_requisition(requisition_id: str, user: User = Depends(get_curre
 @api_router.put("/requisitions/{requisition_id}/approve")
 async def approve_requisition(requisition_id: str, user: User = Depends(get_current_user)):
     """Approve a purchase requisition"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
+    await assert_permission(db, user.role, "requisitions", "update")
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
         raise HTTPException(status_code=403, detail="Only managers can approve requisitions")
     
     req = await db.requisitions.find_one({"requisition_id": requisition_id})
@@ -3885,7 +3943,8 @@ async def approve_requisition(requisition_id: str, user: User = Depends(get_curr
 @api_router.put("/requisitions/{requisition_id}/reject")
 async def reject_requisition(requisition_id: str, reason: str = "", user: User = Depends(get_current_user)):
     """Reject a purchase requisition"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
+    await assert_permission(db, user.role, "requisitions", "update")
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
         raise HTTPException(status_code=403, detail="Only managers can reject requisitions")
     
     req = await db.requisitions.find_one({"requisition_id": requisition_id})
@@ -3978,6 +4037,7 @@ async def list_grns(
     user: User = Depends(get_current_user)
 ):
     """List all Goods Receipt Notes"""
+    await assert_permission(db, user.role, "grn", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -3990,6 +4050,7 @@ async def list_grns(
 @api_router.get("/grn/{grn_id}")
 async def get_grn(grn_id: str, user: User = Depends(get_current_user)):
     """Get GRN by ID"""
+    await assert_permission(db, user.role, "grn", "read")
     grn = await db.grns.find_one({"grn_id": grn_id})
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
@@ -3998,6 +4059,7 @@ async def get_grn(grn_id: str, user: User = Depends(get_current_user)):
 @api_router.post("/grn")
 async def create_grn(data: GRNCreate, user: User = Depends(get_current_user)):
     """Create a new Goods Receipt Note"""
+    await assert_permission(db, user.role, "grn", "create")
     # Get PO
     po = await db.purchase_orders.find_one({"po_id": data.po_id})
     if not po:
@@ -4087,6 +4149,7 @@ async def list_matches(
     user: User = Depends(get_current_user)
 ):
     """List all 3-way matches"""
+    await assert_permission(db, user.role, "three_way_match", "read")
     query = {}
     if status:
         query["status"] = status.value
@@ -4102,6 +4165,7 @@ async def create_three_way_match(
     user: User = Depends(get_current_user)
 ):
     """Create a 3-way match between PO, GRN, and Invoice"""
+    await assert_permission(db, user.role, "three_way_match", "create")
     # Get documents
     po = await db.purchase_orders.find_one({"po_id": po_id})
     grn = await db.grns.find_one({"grn_id": grn_id})
@@ -4174,6 +4238,7 @@ async def create_three_way_match(
 @api_router.put("/three-way-match/{match_id}/approve")
 async def approve_three_way_match(match_id: str, notes: str = "", user: User = Depends(get_current_user)):
     """Approve a 3-way match"""
+    await assert_permission(db, user.role, "three_way_match", "update")
     match = await db.three_way_matches.find_one({"match_id": match_id})
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
@@ -4206,6 +4271,7 @@ async def get_trial_balance(
     user: User = Depends(get_current_user)
 ):
     """Generate Trial Balance Report"""
+    await assert_permission(db, user.role, "reports", "read")
     date = datetime.fromisoformat(as_of_date) if as_of_date else datetime.now(timezone.utc)
     
     # Get all accounts
@@ -4304,6 +4370,7 @@ async def get_balance_sheet(
     user: User = Depends(get_current_user)
 ):
     """Generate Balance Sheet Report"""
+    await assert_permission(db, user.role, "reports", "read")
     date = datetime.fromisoformat(as_of_date) if as_of_date else datetime.now(timezone.utc)
     
     # ASSETS
@@ -4411,6 +4478,7 @@ async def get_balance_sheet(
 @api_router.get("/reports/supplier-performance")
 async def get_supplier_performance(user: User = Depends(get_current_user)):
     """Get supplier performance dashboard data"""
+    await assert_permission(db, user.role, "reports", "read")
     suppliers = await db.suppliers.find({}).to_list(100)
     
     performance_data = []
@@ -4471,6 +4539,7 @@ async def get_supplier_performance(user: User = Depends(get_current_user)):
 @api_router.get("/reports/distributor-performance")
 async def get_distributor_performance(user: User = Depends(get_current_user)):
     """Get distributor performance dashboard data"""
+    await assert_permission(db, user.role, "reports", "read")
     distributors = await db.distributors.find({}).to_list(100)
     
     performance_data = []
@@ -4546,6 +4615,7 @@ async def get_agent_quotations(
     - Manager/Accountant: all pending for their warehouse
     - SuperAdmin/GM: filterable across all warehouses
     """
+    await assert_permission(db, user.role, "quotations", "read")
     query: Dict[str, Any] = {}
 
     if user.role in [UserRole.SALES_REP, UserRole.SALES_EXECUTIVE]:
@@ -4567,6 +4637,7 @@ async def get_agent_quotations(
 async def create_agent_quotation(qt_data: AgentQuotationCreate,
                                   user: User = Depends(get_current_user)):
     """Sales Rep creates a quotation from their assigned warehouse"""
+    await assert_permission(db, user.role, "quotations", "create")
     if user.role not in [UserRole.SALES_REP, UserRole.SALES_EXECUTIVE]:
         raise HTTPException(status_code=403, detail="Only Sales Reps can create agent quotations")
     if not user.warehouse_id:
@@ -4884,6 +4955,7 @@ async def dispatch_sales_order(so_id: str, user: User = Depends(get_current_user
 async def get_agent_ledger(sales_rep_id: Optional[str] = None,
                             user: User = Depends(get_current_user)):
     """Get agent ledger — reps see own ledger, managers can view any agent"""
+    await assert_permission(db, user.role, "agent_ledger", "read")
     if user.role in [UserRole.SALES_REP, UserRole.SALES_EXECUTIVE]:
         target_id = user.user_id
     else:
@@ -4946,8 +5018,7 @@ async def get_agent_ledger(sales_rep_id: Optional[str] = None,
 async def record_agent_payment(payment: AgentPaymentCreate,
                                 user: User = Depends(get_current_user)):
     """Record a payment from a Sales Rep — reduces their outstanding balance"""
-    if user.role not in APPROVAL_ROLES:
-        raise HTTPException(status_code=403, detail="Only Managers/Accountants can record agent payments")
+    await assert_permission(db, user.role, "agent_ledger", "create")
 
     agent = await db.users.find_one({"user_id": payment.sales_rep_id}, {"_id": 0})
     if not agent:
@@ -5000,6 +5071,7 @@ async def get_warehouse_transfers(
     user: User = Depends(get_current_user)
 ):
     """List warehouse transfers — scoped to user's warehouse unless cross-warehouse role"""
+    await assert_permission(db, user.role, "warehouse_transfers", "read")
     query: Dict[str, Any] = {}
     if status:
         query["status"] = status
@@ -5022,6 +5094,7 @@ async def get_warehouse_transfers(
 async def initiate_warehouse_transfer(transfer_data: WarehouseTransferCreate,
                                        user: User = Depends(get_current_user)):
     """Accountant/Manager initiates a transfer from their warehouse to another"""
+    await assert_permission(db, user.role, "warehouse_transfers", "create")
     if user.role not in APPROVAL_ROLES:
         raise HTTPException(status_code=403, detail="Only Managers/Accountants can initiate transfers")
 
@@ -5096,6 +5169,7 @@ async def initiate_warehouse_transfer(transfer_data: WarehouseTransferCreate,
 @api_router.put("/warehouse-transfers/{transfer_id}/confirm")
 async def confirm_warehouse_transfer(transfer_id: str, user: User = Depends(get_current_user)):
     """Receiving warehouse Accountant confirms stock receipt — moves inventory"""
+    await assert_permission(db, user.role, "warehouse_transfers", "update")
     if user.role not in APPROVAL_ROLES:
         raise HTTPException(status_code=403, detail="Only Managers/Accountants can confirm transfers")
 
@@ -5172,6 +5246,7 @@ async def confirm_warehouse_transfer(transfer_id: str, user: User = Depends(get_
 @api_router.put("/warehouse-transfers/{transfer_id}/cancel")
 async def cancel_warehouse_transfer(transfer_id: str, user: User = Depends(get_current_user)):
     """Cancel a pending transfer"""
+    await assert_permission(db, user.role, "warehouse_transfers", "delete")
     transfer = await db.warehouse_transfers.find_one({"transfer_id": transfer_id}, {"_id": 0})
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -5302,6 +5377,7 @@ async def get_branch_summary(user: User = Depends(get_current_user)):
 @api_router.get("/reports/warehouse-performance")
 async def get_warehouse_performance(user: User = Depends(get_current_user)):
     """Warehouse comparison report — Sales, Expenses, Agents"""
+    await assert_permission(db, user.role, "reports", "read")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
                           UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER, UserRole.ACCOUNTANT]:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -5361,6 +5437,163 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
+# ========================
+# PERMISSION MANAGEMENT ENDPOINTS  (Super Admin only)
+# ========================
+
+@api_router.get("/admin/role-permissions")
+async def get_all_role_permissions(user: User = Depends(get_current_user)):
+    """
+    Return the full CRUD permission matrix for every role.
+    Accessible to Super Admin only.
+    """
+    if user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can view role permissions")
+
+    result = []
+    for role_value in [r.value for r in UserRole]:
+        perms = await get_role_permissions(db, role_value)
+        result.append({
+            "role": role_value,
+            "permissions": {m: p.model_dump() for m, p in perms.items()}
+        })
+    return {"roles": result, "modules": MODULES, "module_labels": MODULE_LABELS}
+
+
+@api_router.get("/admin/role-permissions/{role}")
+async def get_single_role_permissions(role: str, user: User = Depends(get_current_user)):
+    """
+    Return CRUD permissions for a single role.
+    Super Admin only.
+    """
+    if user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can view role permissions")
+
+    valid_roles = [r.value for r in UserRole]
+    if role not in valid_roles:
+        raise HTTPException(status_code=404, detail=f"Role '{role}' not found")
+
+    perms = await get_role_permissions(db, role)
+    return {
+        "role": role,
+        "permissions": {m: p.model_dump() for m, p in perms.items()}
+    }
+
+
+@api_router.put("/admin/role-permissions/{role}")
+async def update_role_permissions(
+    role: str,
+    body: PermissionUpdateRequest,
+    user: User = Depends(get_current_user)
+):
+    """
+    Overwrite CRUD permissions for a role.
+    Super Admin only.
+
+    Rules enforced server-side:
+    - super_admin and general_manager always retain full access (cannot be downgraded).
+    - accountant always retains read=True on every module (cannot lose visibility).
+    - Payload may contain a subset of modules; missing modules keep their current values.
+    """
+    if user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can modify role permissions")
+
+    valid_roles = [r.value for r in UserRole]
+    if role not in valid_roles:
+        raise HTTPException(status_code=404, detail=f"Role '{role}' not found")
+
+    # Protect top-level roles
+    if role in ALWAYS_FULL_ACCESS_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Permissions for '{role}' cannot be modified — this role always has full access."
+        )
+
+    # Fetch existing doc so we do a merge, not a clobber
+    existing_doc = await db.role_permissions.find_one({"role": role}, {"_id": 0})
+    existing_raw = existing_doc.get("permissions", {}) if existing_doc else {}
+
+    # Start from current effective permissions
+    current = await get_role_permissions(db, role)
+    merged: dict = {m: p.model_dump() for m, p in current.items()}
+
+    # Apply incoming changes
+    for module, crud in body.permissions.items():
+        if module not in MODULES:
+            raise HTTPException(status_code=422, detail=f"Unknown module: '{module}'")
+        new_crud = crud.model_dump()
+        # Accountant: force read=True on all modules
+        if role == "accountant":
+            new_crud["read"] = True
+        merged[module] = new_crud
+
+    now = datetime.now(timezone.utc)
+    await db.role_permissions.update_one(
+        {"role": role},
+        {"$set": {
+            "permissions": merged,
+            "updated_at": now,
+            "updated_by": user.user_id,
+        }},
+        upsert=True
+    )
+
+    # Invalidate in-process cache for this role
+    invalidate_cache(role)
+
+    await create_audit_log(
+        user.user_id, "update", "role_permissions", role,
+        old_value={"permissions": existing_raw},
+        new_value={"permissions": merged}
+    )
+
+    return {
+        "message": f"Permissions for '{role}' updated successfully.",
+        "role": role,
+        "permissions": merged
+    }
+
+
+@api_router.post("/admin/role-permissions/reset/{role}")
+async def reset_role_permissions(role: str, user: User = Depends(get_current_user)):
+    """
+    Reset a role's permissions back to the hardcoded defaults.
+    Super Admin only.
+    """
+    if user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can reset role permissions")
+
+    valid_roles = [r.value for r in UserRole]
+    if role not in valid_roles:
+        raise HTTPException(status_code=404, detail=f"Role '{role}' not found")
+
+    if role in ALWAYS_FULL_ACCESS_ROLES:
+        raise HTTPException(status_code=400, detail=f"'{role}' always has full access — nothing to reset.")
+
+    from permissions import DEFAULT_PERMISSIONS
+    defaults = DEFAULT_PERMISSIONS.get(role, {})
+    serialised = {m: p.model_dump() for m, p in defaults.items()}
+
+    await db.role_permissions.update_one(
+        {"role": role},
+        {"$set": {
+            "permissions": serialised,
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": user.user_id,
+        }},
+        upsert=True
+    )
+    invalidate_cache(role)
+
+    await create_audit_log(user.user_id, "reset", "role_permissions", role)
+
+    return {
+        "message": f"Permissions for '{role}' reset to defaults.",
+        "role": role,
+        "permissions": serialised
+    }
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -5394,6 +5627,9 @@ async def startup_db_client():
     await db.warehouse_transfers.create_index([("to_warehouse_id", 1), ("status", 1)])
     await db.expenses.create_index("warehouse_id")
     await db.users.create_index([("warehouse_id", 1), ("role", 1)])
+    # Permission system
+    await db.role_permissions.create_index("role", unique=True)
+    await seed_default_permissions(db)
     logger.info("Database indexes created")
 
 @app.on_event("shutdown")
