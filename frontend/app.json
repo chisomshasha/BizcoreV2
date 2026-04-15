@@ -60,7 +60,7 @@
       "eas": {
         "projectId": "382c4080-0a34-4193-8eeb-1d4b08d14562"
       },
-      "backendUrl": "https://YOUR_RAILWAY_APP.railway.app",
+      "backendUrl": "https://bizcore-v2.fly.dev",
       "router": {
         "origin": false
       }
