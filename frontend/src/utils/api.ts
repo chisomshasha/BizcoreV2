@@ -1,7 +1,10 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+// Priority:
+// 1. EXPO_PUBLIC_BACKEND_URL from .env or EAS Build secrets (recommended for production)
+// 2. Fallback (you can set a sensible default)
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcore-v2.fly.dev';   // ← Update this with your actual Fly.io URL
 
 const api = axios.create({
   baseURL: `${BACKEND_URL}/api`,
@@ -11,7 +14,12 @@ const api = axios.create({
   withCredentials: true,
 });
 
-// Add auth token to requests
+// Optional: Add debug logging in development
+if (__DEV__) {
+  console.log('[api] Using BACKEND_URL:', BACKEND_URL);
+}
+
+ // Add auth token to requests
 api.interceptors.request.use(async (config) => {
   const token = await AsyncStorage.getItem('session_token');
   if (token) {
@@ -20,13 +28,14 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// Handle 401 errors
+// Handle 401 errors (logout on auth failure)
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     if (error.response?.status === 401) {
       await AsyncStorage.removeItem('session_token');
       await AsyncStorage.removeItem('user');
+      // Optional: You could navigate to login screen here if you have access to navigation
     }
     return Promise.reject(error);
   }
