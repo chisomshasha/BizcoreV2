@@ -30,4 +30,4 @@
           "commands": [
             "npm audit --audit-level=high"
           ]
-        }
+        },
