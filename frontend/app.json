@@ -1,13 +1,13 @@
 {
   "expo": {
     "name": "BizCore",
-    "slug": "bizcore",
+    "slug": "bizcore2",
     "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "bizcore",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.bizcore.app",
