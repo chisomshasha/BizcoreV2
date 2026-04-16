@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizCore",
     "slug": "bizcore",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "bizcore",
@@ -60,7 +60,7 @@
       "eas": {
         "projectId": "fcd63a1c-422f-46b2-8581-809f39d25aa4"
       },
-      "backendUrl": "https://YOUR_RAILWAY_APP.railway.app",
+      "backendUrl": "https://bizcore-v2.fly.dev",
       "router": {
         "origin": false
       }
