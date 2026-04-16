@@ -41,6 +41,11 @@ from permissions import (
     ALWAYS_FULL_ACCESS_ROLES, ALWAYS_READ_ROLES,
 )
 
+# Force IPv4 connection (important for Fly.io)
+MONGO_URL = os.environ.get('MONGO_URL')
+client = MongoClient(MONGO_URL, family=4)
+db = client['your_database_name']
+
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
