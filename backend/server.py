@@ -5609,7 +5609,10 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://bizcore-v2.fly.dev",
+        "bizcore://",  # For mobile app deep links
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
