@@ -25,6 +25,7 @@ from pymongo import MongoClient
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
 
 # PDF Generation imports
 try:
@@ -5851,6 +5852,7 @@ app.add_middleware(
 
 # Attach rate limiter to app state
 app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # ========================
@@ -5884,4 +5886,4 @@ async def startup_db_client():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    client.close()cc
