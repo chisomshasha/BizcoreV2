@@ -11,14 +11,34 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "hooks": {
+        "postInstall": {
+          "commands": [
+            "npm audit --audit-level=high || echo '⚠️ Security warnings found, review before production'"
+          ]
+        }
       }
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev"
+        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev",
+        "NODE_ENV": "production"
       },
       "android": {
         "buildType": "app-bundle"
+      },
+      "hooks": {
+        "preBuild": {
+          "commands": [
+            "npm run security:audit"
+          ]
+        },
+        "postInstall": {
+          "commands": [
+            "npm audit --audit-level=high"
+          ]
+        }
       }
     }
   },
