@@ -61,8 +61,8 @@ const EDGES = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── CHANGED: read backend URL from env instead of hardcoding Emergent ────────
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+// ── FIXED: consistent backend URL fallback matching api.ts ───────────────────
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcore-v2.fly.dev';
 
 export default function LoginScreen() {
   const router = useRouter();
