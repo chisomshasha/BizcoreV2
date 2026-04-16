@@ -25,3 +25,16 @@ reportlab==4.2.2
 
 # Utilities
 python-multipart==0.0.22
+
+# ============================================================
+# SECURITY PACKAGES (ADDED FOR PRODUCTION HARDENING)
+# ============================================================
+
+# Rate limiting - prevents brute force and DoS attacks
+slowapi==0.1.9
+
+# Cryptography - for session token encryption and secure random generation
+cryptography==42.0.5
+
+# JWT support for mobile authentication (optional but recommended)
+python-jose[cryptography]==3.3.0
