@@ -1,34 +1,20 @@
-# fly.toml for BizCore_V2 on Fly.io
-app = 'bizcorev2'
-primary_region = 'ams'
+app = "bizcorev2"
+primary_region = "ams"
 
 [build]
-  dockerfile = "Dockerfile"
+  # For Python/FastAPI without Dockerfile
+  builder = "paketobuildpacks/builder:base"
+
+[env]
+  PORT = "8080"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
-
-  # Health check – very important for FastAPI startup
-  [[http_service.checks]]
-    interval = "30s"
-    grace_period = "90s"          # Increased – gives your app more time to start
-    method = "get"
-    path = "/"                    # Try "/docs" or "/health" if "/" returns 404
-    protocol = "http"
-    timeout = "15s"
-
-[env]
-  # You can add default env vars here if needed (but secrets are better via fly secrets set)
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
+  memory = "256mb"
   cpus = 1
-
-[processes]
-  web = "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive 300 --limit-max-requests 1000"
+  cpu_kind = "shared"
