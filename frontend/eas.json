@@ -12,14 +12,6 @@
       "android": {
         "buildType": "apk"
       },
-      "hooks": {
-        "postInstall": {
-          "commands": [
-            "npm audit --audit-level=high || echo '⚠️ Security warnings found, review before production'"
-          ]
-        }
-      }
-    },
     "production": {
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev",
