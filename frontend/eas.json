@@ -10,11 +10,8 @@
       },
       "distribution": "internal",
       "android": {
-        "buildType": "apk",
-        "credentialsSource": "remote"
-      },
-      "credentialsSource": "remote",
-      "withoutCredentials": true
+        "buildType": "apk"
+      }
     },
     "production": {
       "env": {
