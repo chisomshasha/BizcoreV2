@@ -6,7 +6,7 @@
   "build": {
     "preview": {
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://erp-mobile-dev.preview.emergentagent.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev"
       },
       "distribution": "internal",
       "android": {
@@ -18,7 +18,7 @@
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://erp-mobile-dev.preview.emergentagent.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev"
       },
       "android": {
         "buildType": "app-bundle"
