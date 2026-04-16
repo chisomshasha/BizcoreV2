@@ -11,7 +11,8 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
+      }
+    },
     "production": {
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev",
@@ -30,4 +31,8 @@
           "commands": [
             "npm audit --audit-level=high"
           ]
-        },
+        }
+      }
+    }
+  }
+}
