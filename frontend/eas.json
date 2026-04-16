@@ -11,7 +11,8 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      }
+      },
+      "installCommand": "npm install --legacy-peer-deps"
     },
     "production": {
       "env": {
@@ -20,7 +21,8 @@
       },
       "android": {
         "buildType": "app-bundle"
-      }
+      },
+      "installCommand": "npm install --legacy-peer-deps"
     }
   }
 }
