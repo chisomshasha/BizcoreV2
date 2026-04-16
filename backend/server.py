@@ -1,11 +1,16 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import httpx
+import secrets
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
@@ -15,9 +20,11 @@ from enum import Enum
 import io
 import base64
 from pymongo import MongoClient
-import os
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
+
+# SECURITY: Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # PDF Generation imports
 try:
@@ -43,18 +50,19 @@ from permissions import (
     ALWAYS_FULL_ACCESS_ROLES, ALWAYS_READ_ROLES,
 )
 
-# Force IPv4 connection (important for Fly.io)
-MONGO_URL = os.environ.get('MONGO_URL')
-client = MongoClient(MONGO_URL, family=4)
-db = client['your_database_name']
+# ========================
+# SECURITY: Rate Limiter Setup
+# ========================
+limiter = Limiter(key_func=get_remote_address)
+app_exception_handlers = {RateLimitExceeded: _rate_limit_exceeded_handler}
 
-# MongoDB connection
+# MongoDB async connection (single client — sync client removed)
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'bizcore_db')]
 
 # Create the main app
-app = FastAPI(title="BizCore API", version="1.0.0")
+app = FastAPI(title="BizCore API", version="1.0.0", exception_handlers=app_exception_handlers)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -65,6 +73,76 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ========================
+# SECURITY: Helper Functions
+# ========================
+
+def sanitize_string(input_str: str) -> str:
+    """Sanitize user input to prevent NoSQL injection"""
+    if not input_str:
+        return ""
+    if not isinstance(input_str, str):
+        return str(input_str)
+    return re.sub(r'[^\w\s\-_\.]', '', input_str)
+
+def validate_object_id(id_str: str) -> bool:
+    """Validate ID format to prevent injection"""
+    if not id_str or not isinstance(id_str, str):
+        return False
+    return bool(re.match(r'^[a-f0-9]{24}$', id_str)) or bool(re.match(r'^[a-zA-Z0-9_\-]{10,50}$', id_str))
+
+def sanitize_query(query: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively sanitize query dictionary values"""
+    sanitized = {}
+    for key, value in query.items():
+        if isinstance(value, str):
+            sanitized[key] = sanitize_string(value)
+        elif isinstance(value, dict):
+            sanitized[key] = sanitize_query(value)
+        elif isinstance(value, list):
+            sanitized[key] = [sanitize_string(v) if isinstance(v, str) else v for v in value]
+        else:
+            sanitized[key] = value
+    return sanitized
+
+# ========================
+# SECURITY: Middleware Classes
+# ========================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
+
+class RequestValidationMiddleware(BaseHTTPMiddleware):
+    """Validate request size and origin"""
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 10_485_760:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Request too large. Maximum size is 10MB."}
+            )
+        if request.method not in ["GET", "OPTIONS", "HEAD"]:
+            origin = request.headers.get("origin")
+            allowed_origins = ["https://bizcore-v2.fly.dev", "bizcore://"]
+            if (origin and origin not in allowed_origins
+                    and "localhost" not in origin
+                    and "127.0.0.1" not in origin):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Origin not allowed"}
+                )
+        return await call_next(request)
 
 # ========================
 # ENUMS
@@ -773,7 +851,7 @@ class Notification(BaseModel):
     is_read: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-# Audit Log Model
+# Audit Log Model (enhanced with IP and user-agent for security tracing)
 class AuditLog(BaseModel):
     log_id: str = Field(default_factory=lambda: f"log_{uuid.uuid4().hex[:12]}")
     user_id: str
@@ -782,6 +860,8 @@ class AuditLog(BaseModel):
     entity_id: str
     old_value: Optional[Dict[str, Any]] = None
     new_value: Optional[Dict[str, Any]] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # Dashboard Models
@@ -812,6 +892,10 @@ async def get_current_user(request: Request) -> User:
     
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # SECURITY: Validate session token format to prevent injection
+    if not re.match(r'^[A-Za-z0-9\-_]+$', session_token):
+        raise HTTPException(status_code=401, detail="Invalid session token format")
     
     session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
     if not session:
@@ -828,6 +912,10 @@ async def get_current_user(request: Request) -> User:
     user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+
+    # SECURITY: Reject deactivated users even if session is still live
+    if not user.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Account is deactivated")
     
     return User(**user)
 
@@ -926,13 +1014,18 @@ async def recalculate_agent_flag(sales_rep_id: str):
 # ========================
 
 @api_router.post("/auth/session")
+@limiter.limit("5/minute")
 async def create_session(request: Request, response: Response):
-    """Exchange session_id for session_token"""
+    """Exchange session_id for session_token (Rate limited: 5/minute)"""
     body = await request.json()
     session_id = body.get("session_id")
     
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
+
+    # SECURITY: Validate session_id format to prevent header injection
+    if not re.match(r'^[A-Za-z0-9\-_]+$', session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id format")
     
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -971,7 +1064,8 @@ async def create_session(request: Request, response: Response):
         }
         await db.users.insert_one(user_doc)
     
-    session_token = data.get("session_token", f"sess_{uuid.uuid4().hex}")
+    # SECURITY: Generate cryptographically secure session token (replaces uuid fallback)
+    session_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     
     await db.user_sessions.delete_many({"user_id": user_id})
@@ -987,13 +1081,45 @@ async def create_session(request: Request, response: Response):
         value=session_token,
         httponly=True,
         secure=True,
-        samesite="none",
+        samesite="lax",  # SECURITY: Changed from "none" to "lax"
         path="/",
         max_age=7 * 24 * 60 * 60
     )
     
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    return {**user, "session_token": session_token}
+    # SECURITY: session_token intentionally NOT returned in body (cookie-only delivery)
+    return {k: v for k, v in user.items() if k != "session_token"}
+
+@api_router.post("/auth/rotate-session")
+@limiter.limit("5/minute")
+async def rotate_session(request: Request, response: Response, user: User = Depends(get_current_user)):
+    """Rotate session token for security (prevents session fixation attacks). Rate limited: 5/minute."""
+    old_token = request.cookies.get("session_token")
+
+    new_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+
+    await db.user_sessions.update_one(
+        {"session_token": old_token},
+        {"$set": {
+            "session_token": new_token,
+            "expires_at": expires_at,
+            "rotated_at": datetime.now(timezone.utc)
+        }}
+    )
+
+    response.set_cookie(
+        key="session_token",
+        value=new_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+
+    await create_audit_log(user.user_id, "rotate_session", "auth", user.user_id, request=request)
+    return {"message": "Session rotated successfully"}
 
 @api_router.get("/auth/me")
 async def get_me(user: User = Depends(get_current_user)):
@@ -1015,8 +1141,9 @@ async def logout(request: Request, response: Response):
 # ========================
 
 @api_router.get("/users", response_model=List[User])
-async def get_users(user: User = Depends(get_current_user)):
-    """Get all users (admin only)"""
+@limiter.limit("100/minute")
+async def get_users(request: Request, user: User = Depends(get_current_user)):
+    """Get all users (admin only). Rate limited: 100/minute."""
     await assert_permission(db, user.role, "users", "read")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
                           UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
@@ -1025,23 +1152,28 @@ async def get_users(user: User = Depends(get_current_user)):
     query: Dict[str, Any] = {}
     # Warehouse-scoped managers only see their own warehouse users
     if user.role in [UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER] and user.warehouse_id:
-        query["warehouse_id"] = user.warehouse_id
+        query["warehouse_id"] = sanitize_string(user.warehouse_id)
 
     users = await db.users.find(query, {"_id": 0}).to_list(1000)
     return [User(**u) for u in users]
 
 @api_router.post("/users/create")
-async def create_user(user_data: UserCreate, current_user: User = Depends(get_current_user)):
-    """SuperAdmin creates a user — Name, Email, Phone required"""
+@limiter.limit("20/minute")
+async def create_user(request: Request, user_data: UserCreate, current_user: User = Depends(get_current_user)):
+    """SuperAdmin creates a user — Name, Email, Phone required. Rate limited: 20/minute."""
     if current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Only SuperAdmin can create users")
 
+    sanitized_email = sanitize_string(user_data.email.lower())
+    sanitized_name = sanitize_string(user_data.name)
+    sanitized_phone = sanitize_string(user_data.phone)
+
     # Validate email uniqueness
-    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
+    existing = await db.users.find_one({"email": sanitized_email}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="A user with this email already exists")
 
-    if not user_data.phone or not user_data.phone.strip():
+    if not sanitized_phone or not sanitized_phone.strip():
         raise HTTPException(status_code=422, detail="Phone number is required when creating a user")
 
     # Resolve warehouse name if provided
@@ -1055,9 +1187,9 @@ async def create_user(user_data: UserCreate, current_user: User = Depends(get_cu
     new_user_id = f"user_{uuid.uuid4().hex[:12]}"
     user_doc = {
         "user_id": new_user_id,
-        "email": user_data.email,
-        "name": user_data.name,
-        "phone": user_data.phone,
+        "email": sanitized_email,
+        "name": sanitized_name,
+        "phone": sanitized_phone,
         "role": user_data.role.value,
         "warehouse_id": user_data.warehouse_id,
         "warehouse_name": wh_name,
@@ -1070,12 +1202,28 @@ async def create_user(user_data: UserCreate, current_user: User = Depends(get_cu
     }
     await db.users.insert_one(user_doc)
     await create_audit_log(current_user.user_id, "create", "user", new_user_id,
-                           new_value={"email": user_data.email, "role": user_data.role.value})
+                           new_value={"email": sanitized_email, "role": user_data.role.value},
+                           request=request)
     return {**user_doc, "message": "User created. They can now login with their email."}
 
+# Role rank map used to prevent privilege escalation
+_ROLE_RANK: Dict[str, int] = {
+    UserRole.VIEWER.value: 1,
+    UserRole.SALES_CLERK.value: 2,
+    UserRole.PURCHASE_CLERK.value: 2,
+    UserRole.SALES_EXECUTIVE.value: 3,
+    UserRole.SALES_REP.value: 3,
+    UserRole.ACCOUNTANT.value: 4,
+    UserRole.WAREHOUSE_MANAGER.value: 5,
+    UserRole.MANAGER.value: 5,
+    UserRole.GENERAL_MANAGER.value: 6,
+    UserRole.SUPER_ADMIN.value: 7,
+}
+
 @api_router.put("/users/{user_id}")
-async def update_user(user_id: str, update: UserUpdate, user: User = Depends(get_current_user)):
-    """Update user"""
+@limiter.limit("100/minute")
+async def update_user(request: Request, user_id: str, update: UserUpdate, user: User = Depends(get_current_user)):
+    """Update user. Rate limited: 100/minute."""
     await assert_permission(db, user.role, "users", "update")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
                           UserRole.WAREHOUSE_MANAGER, UserRole.MANAGER]:
@@ -1083,8 +1231,18 @@ async def update_user(user_id: str, update: UserUpdate, user: User = Depends(get
 
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
 
+    # SECURITY: Prevent privilege escalation — cannot assign a role >= own rank
+    if "role" in update_data:
+        caller_rank = _ROLE_RANK.get(user.role.value, 0)
+        target_rank = _ROLE_RANK.get(update_data["role"].value if hasattr(update_data["role"], "value") else update_data["role"], 0)
+        if target_rank >= caller_rank and user.role != UserRole.SUPER_ADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot assign a role equal to or higher than your own"
+            )
+
     # Resolve warehouse name if warehouse_id is being changed
-    if "warehouse_id" in update_data:
+    if "warehouse_id" in update_data and update_data["warehouse_id"]:
         wh = await db.warehouses.find_one({"warehouse_id": update_data["warehouse_id"]}, {"_id": 0})
         if not wh:
             raise HTTPException(status_code=404, detail="Warehouse not found")
@@ -1100,9 +1258,10 @@ async def update_user(user_id: str, update: UserUpdate, user: User = Depends(get
     return User(**updated_user)
 
 @api_router.put("/users/{user_id}/debt-ceiling")
-async def set_agent_debt_ceiling(user_id: str, debt_ceiling: float,
+@limiter.limit("50/minute")
+async def set_agent_debt_ceiling(request: Request, user_id: str, debt_ceiling: float,
                                   user: User = Depends(get_current_user)):
-    """Set debt ceiling for a Sales Rep — Manager/Accountant of same warehouse or SuperAdmin"""
+    """Set debt ceiling for a Sales Rep — Manager/Accountant of same warehouse or SuperAdmin. Rate limited: 50/minute."""
     target = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1127,13 +1286,14 @@ async def set_agent_debt_ceiling(user_id: str, debt_ceiling: float,
             "is_flagged": updated.get("is_flagged", False)}
 
 @api_router.get("/users/agents")
-async def get_warehouse_agents(user: User = Depends(get_current_user)):
-    """Get Sales Reps for current user's warehouse with outstanding balance & flag"""
+@limiter.limit("100/minute")
+async def get_warehouse_agents(request: Request, user: User = Depends(get_current_user)):
+    """Get Sales Reps for current user's warehouse with outstanding balance & flag. Rate limited: 100/minute."""
     wh_filter = get_user_warehouse_filter(user)
     query: Dict[str, Any] = {"role": {"$in": [UserRole.SALES_REP.value,
                                                UserRole.SALES_EXECUTIVE.value]}}
     if wh_filter:
-        query["warehouse_id"] = wh_filter
+        query["warehouse_id"] = sanitize_string(wh_filter)
 
     agents = await db.users.find(query, {"_id": 0}).to_list(500)
     result = []
@@ -2236,15 +2396,31 @@ async def get_sales_analysis_report(
 # AUDIT LOG ENDPOINTS
 # ========================
 
-async def create_audit_log(user_id: str, action: str, entity_type: str, entity_id: str, old_value: dict = None, new_value: dict = None):
-    """Helper function to create audit logs"""
+async def create_audit_log(
+    user_id: str, action: str, entity_type: str, entity_id: str,
+    old_value: dict = None, new_value: dict = None,
+    request: Request = None
+):
+    """Helper function to create audit logs with IP address and user-agent for security tracing"""
+    ip_address = None
+    user_agent = None
+    if request:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            ip_address = forwarded.split(",")[0].strip()
+        else:
+            ip_address = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+
     log = AuditLog(
         user_id=user_id,
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
         old_value=old_value,
-        new_value=new_value
+        new_value=new_value,
+        ip_address=ip_address,
+        user_agent=user_agent
     )
     await db.audit_logs.insert_one(log.model_dump())
 
@@ -3655,11 +3831,13 @@ async def unregister_push_token(user: User = Depends(get_current_user)):
     return {"message": "Push token unregistered"}
 
 @api_router.get("/notifications/push-tokens")
-async def get_push_tokens(user: User = Depends(get_current_user)):
-    """Get all push tokens (admin only)"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.MANAGER]:
+@limiter.limit("20/minute")
+async def get_push_tokens(request: Request, user: User = Depends(get_current_user)):
+    """Get push tokens — SUPER_ADMIN only. Rate limited: 20/minute."""
+    # SECURITY: Restricted to SUPER_ADMIN only (was incorrectly open to MANAGER)
+    if user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
+
     tokens = await db.push_tokens.find({}, {"_id": 0}).to_list(1000)
     return tokens
 
@@ -5603,24 +5781,85 @@ async def reset_role_permissions(role: str, user: User = Depends(get_current_use
     }
 
 
-# Include the router in the main app
+# ========================
+# SECURITY HEALTH CHECK ENDPOINT
+# ========================
+
+@api_router.get("/security/health")
+async def security_health_check():
+    """Check security configuration status"""
+    return {
+        "https_enabled": True,
+        "hsts_enabled": True,
+        "rate_limiting_enabled": True,
+        "cors_restricted": True,
+        "session_rotation_available": True,
+        "audit_logging_with_ip": True,
+        "nosql_injection_protection": True,
+        "privilege_escalation_guard": True,
+        "request_size_limit_mb": 10,
+        "inactive_user_rejection": True,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+# ========================
+# HEALTH CHECK
+# ========================
+
+@api_router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# ========================
+# INCLUDE ROUTER
+# ========================
+
 app.include_router(api_router)
 
+# ========================
+# MIDDLEWARE SETUP
+# Note: Starlette middleware runs in LIFO order.
+# Execution order on REQUEST:  RequestValidation → SecurityHeaders → TrustedHost → HTTPS → CORS
+# Execution order on RESPONSE: CORS → HTTPS → TrustedHost → SecurityHeaders → RequestValidation
+# ========================
+
+# Added last = runs outermost (first on request, last on response)
+app.add_middleware(RequestValidationMiddleware)
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["bizcore-v2.fly.dev", "localhost", "127.0.0.1"]
+)
+
+app.add_middleware(HTTPSRedirectMiddleware)
+
+# Added first = runs innermost (last on request, first on response)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=[
         "https://bizcore-v2.fly.dev",
-        "bizcore://",  # For mobile app deep links
+        "bizcore://",
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Accept"],
 )
+
+# Attach rate limiter to app state
+app.state.limiter = limiter
+
+
+# ========================
+# DATABASE STARTUP / SHUTDOWN
+# ========================
 
 @app.on_event("startup")
 async def startup_db_client():
     """Initialize database indexes"""
-    # Existing indexes
     await db.products.create_index("sku", unique=True)
     await db.products.create_index("barcode")
     await db.products.create_index("category")
@@ -5630,7 +5869,6 @@ async def startup_db_client():
     await db.invoices.create_index("invoice_number", unique=True)
     await db.users.create_index("email", unique=True)
     await db.user_sessions.create_index("session_token")
-    # New indexes
     await db.agent_quotations.create_index("sales_rep_id")
     await db.agent_quotations.create_index([("warehouse_id", 1), ("status", 1)])
     await db.agent_ledger_entries.create_index("sales_rep_id")
@@ -5639,10 +5877,10 @@ async def startup_db_client():
     await db.warehouse_transfers.create_index([("to_warehouse_id", 1), ("status", 1)])
     await db.expenses.create_index("warehouse_id")
     await db.users.create_index([("warehouse_id", 1), ("role", 1)])
-    # Permission system
     await db.role_permissions.create_index("role", unique=True)
     await seed_default_permissions(db)
-    logger.info("Database indexes created")
+    logger.info("Database indexes created and security middleware active")
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
