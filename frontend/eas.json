@@ -16,6 +16,7 @@
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev"
       },
+      "distribution": "production",
       "android": {
-        "buildType": "apk"
+        "buildType": ""
       }
