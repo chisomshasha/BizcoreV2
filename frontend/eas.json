@@ -14,6 +14,14 @@
       },
     "production": {
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev",
-        "NODE_ENV": "production"
+        "EXPO_PUBLIC_BACKEND_URL": "https://bizcore-v2.fly.dev"
+      },
+      "android": {
+        "buildType": "apk"
       }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
