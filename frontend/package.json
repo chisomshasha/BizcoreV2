@@ -58,6 +58,7 @@
     "react-native-web": "~0.19.12",
     "react-native-webview": "13.8.6",
     "zustand": "^5.0.0"
+    "eas-build-pre-install": "npm config set legacy-peer-deps true"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
