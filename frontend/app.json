@@ -1,75 +1,36 @@
 {
   "expo": {
-    "name": "BizCore",
+    "name": "BizcoreV2",
     "slug": "bizcore2",
     "version": "2.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "bizcore",
-    "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.bizcore.app",
-      "infoPlist": {
-        "NSCameraUsageDescription": "Scan barcodes to look up products",
-        "NSPhotoLibraryUsageDescription": "Attach photos to records"
-      }
+      "bundleIdentifier": "com.yourcompany.bizcorev2"
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#0F172A"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
-      "package": "com.bizcore.app",
-      "permissions": [
-        "CAMERA",
-        "VIBRATE",
-        "READ_MEDIA_IMAGES",
-        "READ_MEDIA_VIDEO"
-      ]
+      "package": "com.yourcompany.bizcorev2"
     },
     "web": {
-      "bundler": "metro",
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
-    },
-    "plugins": [
-      "expo-router",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#0F172A"
-        }
-      ],
-      [
-        "expo-camera",
-        {
-          "cameraPermission": "Scan barcodes to look up products"
-        }
-      ],
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/images/icon.png",
-          "color": "#0F172A"
-        }
-      ]
-    ],
-    "experiments": {
-      "typedRoutes": true
+      "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {
-        "projectId": "fcd63a1c-422f-46b2-8581-809f39d25aa4"
-      },
-      "backendUrl": "https://bizcore-v2.fly.dev",
-      "router": {
-        "origin": false
+        "projectId": "your-project-id-here"
       }
     }
   }
