@@ -1,4 +1,4 @@
-echo '{
+{
   "cli": {
     "version": ">= 5.0.0",
     "appVersionSource": "local"
@@ -25,4 +25,4 @@ echo '{
   "submit": {
     "production": {}
   }
-}' > eas.json
+}
