@@ -12,7 +12,8 @@
     "build:android": "eas build --platform android",
     "build:ios": "eas build --platform ios",
     "reset-project": "node ./scripts/reset-project.js",
-    "security:audit": "npm audit --audit-level=high"
+    "security:audit": "npm audit --audit-level=high",
+    "eas-build-pre-install": "npm config set legacy-peer-deps true"
   },
   "dependencies": {
     "@babel/runtime": "^7.20.6",
@@ -58,7 +59,6 @@
     "react-native-web": "~0.19.12",
     "react-native-webview": "13.8.6",
     "zustand": "^5.0.0"
-    "eas-build-pre-install": "npm config set legacy-peer-deps true"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
