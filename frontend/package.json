@@ -10,7 +10,6 @@
     "lint": "expo lint",
     "prebuild": "expo prebuild --clean",
     "build:android": "eas build --platform android",
-    "build:ios": "eas build --platform ios",
     "reset-project": "node ./scripts/reset-project.js",
     "security:audit": "npm audit --audit-level=high",
     "eas-build-pre-install": "npm config set legacy-peer-deps true"
