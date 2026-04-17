@@ -1,5 +1,4 @@
-cat > eas.json << 'EOF'
-{
+echo '{
   "cli": {
     "version": ">= 5.0.0",
     "appVersionSource": "local"
@@ -26,5 +25,4 @@ cat > eas.json << 'EOF'
   "submit": {
     "production": {}
   }
-}
-EOF
+}' > eas.json
