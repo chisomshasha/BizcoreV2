@@ -32,7 +32,7 @@ async def google_auth(redirect_uri: str = ""):
     consent screen. The frontend opens this URL via WebBrowser.openAuthSessionAsync.
 
     redirect_uri — the app deep-link URL to return to after login
-                   e.g. bizcore:///auth-callback
+                   e.g. bizcorev2://auth-callback
     """
     from fastapi.responses import RedirectResponse
 
@@ -69,7 +69,8 @@ async def google_callback(code: str = "", state: str = "", error: str = ""):
     try:
         app_redirect = base64.urlsafe_b64decode(state.encode()).decode()
     except Exception:
-        app_redirect = "bizcore:///auth-callback"
+        # FIXED: Use the correct scheme matching app.json
+        app_redirect = "bizcorev2://auth-callback"
 
     if error:
         logger.warning(f"Google OAuth error: {error}")
