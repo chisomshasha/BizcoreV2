@@ -2,8 +2,8 @@ app = "bizcorev2"
 primary_region = "ams"
 
 [build]
-  # For Python/FastAPI without Dockerfile
   builder = "paketobuildpacks/builder:base"
+  buildpacks = ["gcr.io/paketo-buildpacks/python"]
 
 [env]
   PORT = "8080"
@@ -15,6 +15,6 @@ primary_region = "ams"
   auto_start_machines = true
 
 [[vm]]
-  memory = "256mb"
+  memory = "512mb"
   cpus = 1
   cpu_kind = "shared"
