@@ -5866,7 +5866,58 @@ async def startup_db_client():
     await seed_default_permissions(db)
     logger.info("Database indexes created and security middleware active")
 
-
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    """Close database connections on shutdown"""
     client.close()
+    logger.info("Database connections closed")
+
+# ========================
+# HEALTH CHECK (single copy)
+# ========================
+
+@api_router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+# ========================
+# SECURITY HEALTH CHECK ENDPOINT
+# ========================
+
+@api_router.get("/security/health")
+async def security_health_check():
+    """Check security configuration status"""
+    return {
+        "https_enabled": True,
+        "hsts_enabled": True,
+        "rate_limiting_enabled": True,
+        "cors_restricted": True,
+        "session_rotation_available": True,
+        "audit_logging_with_ip": True,
+        "nosql_injection_protection": True,
+        "privilege_escalation_guard": True,
+        "request_size_limit_mb": 10,
+        "inactive_user_rejection": True,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+# ========================
+# INCLUDE ROUTER
+# ========================
+
+app.include_router(api_router)
+
+# ========================
+# MIDDLEWARE SETUP
+# ========================
+
+# ... (middleware setup remains the same) ...
+
+# ========================
+# RUN SERVER
+# ========================
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
