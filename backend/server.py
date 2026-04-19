@@ -30,6 +30,11 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 
+# Supabase Configuration
+SUPABASE_URL = "https://bffpwkgtuukmldwtujxq.supabase.co"
+SUPABASE_ANON_KEY = "sb_publishable_S7HNPHpqB3bDOPeGhX1yzg_PiPdkynw"
+supabase_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
 # PDF Generation imports
 try:
     from reportlab.lib import colors
