@@ -18,9 +18,9 @@ if (__DEV__) {
   console.log('[api] Using BACKEND_URL:', BACKEND_URL);
 }
 
- // Add auth token to requests
+// UPDATED: Add Supabase token to requests (changed from 'session_token' to 'supabase_token')
 api.interceptors.request.use(async (config) => {
-  const token = await AsyncStorage.getItem('session_token');
+  const token = await AsyncStorage.getItem('supabase_token');
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -32,7 +32,8 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     if (error.response?.status === 401) {
-      await AsyncStorage.removeItem('session_token');
+      // UPDATED: Remove supabase_token instead of session_token
+      await AsyncStorage.removeItem('supabase_token');
       await AsyncStorage.removeItem('user');
       // Optional: You could navigate to login screen here if you have access to navigation
     }
