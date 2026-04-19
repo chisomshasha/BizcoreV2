@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import create_client, Client
+from fastapi import Header, HTTPException, Depends
+import jwt  # pip install PyJWT
 import os
 import logging
 import httpx
