@@ -5866,6 +5866,10 @@ async def startup_db_client():
     await seed_default_permissions(db)
     logger.info("Database indexes created and security middleware active")
 
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
