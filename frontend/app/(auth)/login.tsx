@@ -18,6 +18,7 @@ import * as Linking from 'expo-linking';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '../../src/components/ThemedComponents';
 import { useAuthStore } from '../../src/store/authStore';
+import { supabase } from '../../src/lib/supabase';
 
 const { width, height } = Dimensions.get('window');
 
@@ -61,7 +62,7 @@ const EDGES = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── FIXED: consistent backend URL fallback matching api.ts ───────────────────
+// Backend URL
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcore-v2.fly.dev';
 
 export default function LoginScreen() {
@@ -117,34 +118,63 @@ export default function LoginScreen() {
     ).start();
   }, []);
 
-  // ── CHANGED: listen for session_token (query param) instead of session_id (hash) ──
+  // Handle deep link from Supabase OAuth redirect
   useEffect(() => {
-    const handleUrl = async (url: string) => {
+    const handleDeepLink = async (url: string) => {
       if (hasProcessed.current) return;
 
-      // Our backend redirects to: bizcore:///auth-callback?session_token=sess_xxx
-      // or bizcore:///auth-callback?error=xxx
-      const queryIndex = url.indexOf('?');
-      if (queryIndex === -1) return;
+      // Supabase redirects to: bizcorev2://auth-callback#access_token=xxx&refresh_token=xxx
+      const hashIndex = url.indexOf('#');
+      if (hashIndex === -1) return;
 
-      const params       = new URLSearchParams(url.substring(queryIndex + 1));
-      const sessionToken = params.get('session_token');
-      const authError    = params.get('error');
+      const params = new URLSearchParams(url.substring(hashIndex + 1));
+      const accessToken = params.get('access_token');
+      const refreshToken = params.get('refresh_token');
+      const errorDescription = params.get('error_description');
 
-      if (authError) {
-        setError(`Sign-in failed: ${authError.replace(/_/g, ' ')}`);
+      if (errorDescription) {
+        setError(`Sign-in failed: ${decodeURIComponent(errorDescription)}`);
         setIsLoading(false);
         hasProcessed.current = false;
         return;
       }
 
-      if (sessionToken) {
+      if (accessToken && refreshToken) {
         hasProcessed.current = true;
         setIsLoading(true);
+        
         try {
-          await login(sessionToken);
-          router.replace('/(tabs)');
+          // Set the Supabase session
+          const { data, error: sessionError } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          });
+
+          if (sessionError) throw sessionError;
+
+          if (data.session) {
+            // Verify the token with your backend
+            const verifyResponse = await fetch(`${BACKEND_URL}/auth/verify`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${data.session.access_token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (!verifyResponse.ok) {
+              const errorData = await verifyResponse.json();
+              throw new Error(errorData.detail || 'Backend verification failed');
+            }
+
+            const userData = await verifyResponse.json();
+            
+            // Call your existing login function with the token and user data
+            await login(data.session.access_token, userData.user);
+            router.replace('/(tabs)');
+          }
         } catch (err: any) {
+          console.error('Login error:', err);
           setError(err.message || 'Login failed');
           setIsLoading(false);
           hasProcessed.current = false;
@@ -152,14 +182,22 @@ export default function LoginScreen() {
       }
     };
 
-    Linking.getInitialURL().then(url => { if (url) handleUrl(url); });
-    const sub = Linking.addEventListener('url', e => handleUrl(e.url));
-    return () => sub.remove();
-  }, []);
+    // Check for initial URL
+    Linking.getInitialURL().then(url => {
+      if (url) handleDeepLink(url);
+    });
+    
+    // Listen for subsequent URLs
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      handleDeepLink(url);
+    });
+    
+    return () => subscription.remove();
+  }, [login, router]);
 
   useEffect(() => {
     if (isAuthenticated) router.replace('/(tabs)');
-  }, [isAuthenticated]);
+  }, [isAuthenticated, router]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -167,50 +205,40 @@ export default function LoginScreen() {
       setError(null);
       hasProcessed.current = false;
 
-      // Deep-link URL the backend will redirect to after Google signs the user in
-      const redirectUrl = Linking.createURL('auth-callback');
+      // Create redirect URL for deep linking
+      const redirectUrl = Linking.createURL('auth-callback', {
+        scheme: 'bizcorev2',
+      });
 
-      // ── CHANGED: point to our Railway backend's Google OAuth entry point ──
-      // The backend redirects to Google, Google redirects back to backend,
-      // backend redirects to redirectUrl with ?session_token=
-      const authUrl = `${BACKEND_URL}/api/auth/google?redirect_uri=${encodeURIComponent(redirectUrl)}`;
+      // Start Supabase OAuth flow
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: redirectUrl,
+          skipBrowserRedirect: true, // We'll handle the redirect manually
+        },
+      });
 
-      if (Platform.OS === 'web') {
-        window.location.href = authUrl;
-      } else {
-        const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+      if (error) throw error;
+
+      if (data?.url) {
+        // Open the OAuth URL in the browser
+        const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
 
         if (result.type === 'success' && result.url) {
-          // Inline-handle in case the Linking listener fires before this resolves
-          const queryIndex = result.url.indexOf('?');
-          if (queryIndex !== -1) {
-            const params       = new URLSearchParams(result.url.substring(queryIndex + 1));
-            const sessionToken = params.get('session_token');
-            const authError    = params.get('error');
-
-            if (authError) {
-              setError(`Sign-in failed: ${authError.replace(/_/g, ' ')}`);
-              setIsLoading(false);
-              return;
-            }
-
-            if (sessionToken && !hasProcessed.current) {
-              hasProcessed.current = true;
-              await login(sessionToken);
-              router.replace('/(tabs)');
-              return;
-            }
-          }
-        }
-
-        // User dismissed the browser without completing sign-in
-        if (!hasProcessed.current) {
+          // The deep link handler will process the tokens
+          console.log('OAuth successful, processing deep link');
+        } else if (result.type === 'cancel') {
+          setError('Sign-in was cancelled');
           setIsLoading(false);
+          hasProcessed.current = false;
         }
       }
     } catch (err: any) {
+      console.error('Google login error:', err);
       setError(err.message || 'Authentication failed');
       setIsLoading(false);
+      hasProcessed.current = false;
     }
   };
 
