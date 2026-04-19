@@ -890,43 +890,30 @@ class DashboardStats(BaseModel):
 # AUTHENTICATION HELPERS
 # ========================
 
-async def get_current_user(request: Request) -> User:
-    """Get current user from session token"""
-    session_token = request.cookies.get("session_token")
-    
-    if not session_token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            session_token = auth_header.split(" ")[1]
-    
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+async def get_current_user(authorization: str = Header(...)) -> User:
+    """Dependency to get current user from Supabase token"""
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
 
-    # SECURITY: Validate session token format to prevent injection
-    if not re.match(r'^[A-Za-z0-9\-_]+$', session_token):
-        raise HTTPException(status_code=401, detail="Invalid session token format")
-    
-    session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    
-    expires_at = session.get("expires_at")
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Session expired")
-    
-    user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    try:
+        user_response = supabase_client.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(401, "Invalid token")
 
-    # SECURITY: Reject deactivated users even if session is still live
-    if not user.get("is_active", True):
-        raise HTTPException(status_code=403, detail="Account is deactivated")
-    
-    return User(**user)
+        email = user_response.user.email
+        user = await db.users.find_one({"email": email}, {"_id": 0})
+        if not user:
+            raise HTTPException(401, "User not found in database")
+        if not user.get("is_active", True):
+            raise HTTPException(401, "Account disabled")
+
+        return User(**user)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 async def get_optional_user(request: Request) -> Optional[User]:
     """Get current user if authenticated, None otherwise"""
@@ -1022,82 +1009,70 @@ async def recalculate_agent_flag(sales_rep_id: str):
 # AUTH ENDPOINTS
 # ========================
 
-@api_router.post("/auth/session")
-@limiter.limit("5/minute")
-async def create_session(request: Request, response: Response):
-    """Exchange session_id for session_token (Rate limited: 5/minute)"""
-    body = await request.json()
-    session_id = body.get("session_id")
-    
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id required")
+@api_router.post("/auth/verify")
+async def verify_supabase_token(token: str = Header(..., alias="Authorization")):
+    """
+    Verify a Supabase JWT token and return/create the user in your database.
+    The frontend sends: Authorization: Bearer <supabase_access_token>
+    """
+    # Remove "Bearer " prefix if present
+    if token.startswith("Bearer "):
+        token = token[7:]
 
-    # SECURITY: Validate session_id format to prevent header injection
-    if not re.match(r'^[A-Za-z0-9\-_]+$', session_id):
-        raise HTTPException(status_code=400, detail="Invalid session_id format")
-    
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id}
-        )
-        
-        if resp.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid session_id")
-        
-        data = resp.json()
-    
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
-    existing_user = await db.users.find_one({"email": data["email"]}, {"_id": 0})
-    
-    if existing_user:
-        user_id = existing_user["user_id"]
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "name": data["name"],
-                "picture": data.get("picture"),
-                "updated_at": datetime.now(timezone.utc)
-            }}
-        )
-    else:
-        user_doc = {
-            "user_id": user_id,
-            "email": data["email"],
-            "name": data["name"],
-            "picture": data.get("picture"),
-            "role": UserRole.VIEWER.value,
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc)
-        }
-        await db.users.insert_one(user_doc)
-    
-    # SECURITY: Generate cryptographically secure session token (replaces uuid fallback)
-    session_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    
-    await db.user_sessions.delete_many({"user_id": user_id})
-    await db.user_sessions.insert_one({
-        "user_id": user_id,
-        "session_token": session_token,
-        "expires_at": expires_at,
-        "created_at": datetime.now(timezone.utc)
-    })
-    
-    response.set_cookie(
-        key="session_token",
-        value=session_token,
-        httponly=True,
-        secure=True,
-        samesite="lax",  # SECURITY: Changed from "none" to "lax"
-        path="/",
-        max_age=7 * 24 * 60 * 60
-    )
-    
-    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    # SECURITY: session_token intentionally NOT returned in body (cookie-only delivery)
-    return {k: v for k, v in user.items() if k != "session_token"}
+    try:
+        # Verify the token with Supabase
+        user_response = supabase_client.auth.get_user(token)
+
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        supabase_user = user_response.user
+        email = supabase_user.email
+        name = supabase_user.user_metadata.get("full_name", email)
+        picture = supabase_user.user_metadata.get("avatar_url", "")
+
+        # Find or create user in your MongoDB
+        existing = await db.users.find_one({"email": email})
+
+        if existing:
+            user_id = existing["user_id"]
+            # Update name/picture if changed
+            await db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "name": name,
+                    "picture": picture,
+                    "updated_at": datetime.now(timezone.utc)
+                }}
+            )
+        else:
+            # Create new user (first user becomes super_admin)
+            user_count = await db.users.count_documents({})
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            user_doc = {
+                "user_id": user_id,
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "role": "super_admin" if user_count == 0 else "viewer",
+                "is_active": True,
+                "is_invited": False,
+                "debt_ceiling": 0.0,
+                "is_flagged": False,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+            await db.users.insert_one(user_doc)
+
+        # Return user info to frontend
+        user = await db.users.find_one({"email": email}, {"_id": 0})
+        return {"user": user, "supabase_token": token}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 @api_router.post("/auth/rotate-session")
 @limiter.limit("5/minute")
@@ -1131,9 +1106,9 @@ async def rotate_session(request: Request, response: Response, user: User = Depe
     return {"message": "Session rotated successfully"}
 
 @api_router.get("/auth/me")
-async def get_me(user: User = Depends(get_current_user)):
+async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user info"""
-    return user.model_dump()
+    return current_user.model_dump()
 
 @api_router.post("/auth/logout")
 async def logout(request: Request, response: Response):
