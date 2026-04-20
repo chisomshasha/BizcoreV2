@@ -49,7 +49,7 @@ const FEATURES = [
   { label: 'Finance',     color: '#EC4899', icon: 'wallet-outline'        },
   { label: 'Reports',     color: '#06B6D4', icon: 'stats-chart-outline'   },
   { label: 'Procurement', color: '#8B5CF6', icon: 'receipt-outline'       },
-];
+]);
 
 // Six edges of the hexagon — pre-computed midpoint + rotation for each line
 const EDGES = [
@@ -121,18 +121,33 @@ export default function LoginScreen() {
   // Handle deep link from Supabase OAuth redirect
   useEffect(() => {
     const handleDeepLink = async (url: string) => {
-      if (hasProcessed.current) return;
+      console.log('🔗 Deep link received:', url);
+      
+      if (hasProcessed.current) {
+        console.log('⚠️ Already processed, skipping');
+        return;
+      }
 
       // Supabase redirects to: bizcorev2://auth-callback#access_token=xxx&refresh_token=xxx
       const hashIndex = url.indexOf('#');
-      if (hashIndex === -1) return;
+      console.log('📝 Hash index:', hashIndex);
+      
+      if (hashIndex === -1) {
+        console.log('❌ No hash fragment found in URL');
+        return;
+      }
 
       const params = new URLSearchParams(url.substring(hashIndex + 1));
       const accessToken = params.get('access_token');
       const refreshToken = params.get('refresh_token');
       const errorDescription = params.get('error_description');
+      
+      console.log('🔑 Access token present:', !!accessToken);
+      console.log('🔄 Refresh token present:', !!refreshToken);
+      console.log('❌ Error description:', errorDescription);
 
       if (errorDescription) {
+        console.log('❌ OAuth error:', errorDescription);
         setError(`Sign-in failed: ${decodeURIComponent(errorDescription)}`);
         setIsLoading(false);
         hasProcessed.current = false;
@@ -140,6 +155,7 @@ export default function LoginScreen() {
       }
 
       if (accessToken && refreshToken) {
+        console.log('✅ Tokens received, setting Supabase session...');
         hasProcessed.current = true;
         setIsLoading(true);
         
@@ -150,11 +166,17 @@ export default function LoginScreen() {
             refresh_token: refreshToken,
           });
 
-          if (sessionError) throw sessionError;
+          if (sessionError) {
+            console.log('❌ Supabase session error:', sessionError);
+            throw sessionError;
+          }
 
           if (data.session) {
+            console.log('✅ Supabase session set successfully');
+            console.log('📡 Verifying token with backend...');
+            
             // Verify the token with your backend
-            const verifyResponse = await fetch(`${BACKEND_URL}/auth/verify`, {
+            const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${data.session.access_token}`,
@@ -162,33 +184,44 @@ export default function LoginScreen() {
               },
             });
 
+            console.log('📡 Backend verify response status:', verifyResponse.status);
+
             if (!verifyResponse.ok) {
               const errorData = await verifyResponse.json();
+              console.log('❌ Backend verification failed:', errorData);
               throw new Error(errorData.detail || 'Backend verification failed');
             }
 
             const userData = await verifyResponse.json();
+            console.log('✅ Backend verification successful for user:', userData.user?.email);
             
             // Call your existing login function with the token and user data
             await login(data.session.access_token, userData.user);
+            console.log('✅ Login function completed, navigating to tabs...');
             router.replace('/(tabs)');
+          } else {
+            console.log('❌ No session data returned from Supabase');
           }
         } catch (err: any) {
-          console.error('Login error:', err);
+          console.error('❌ Login error:', err);
           setError(err.message || 'Login failed');
           setIsLoading(false);
           hasProcessed.current = false;
         }
+      } else {
+        console.log('❌ Missing access_token or refresh_token');
       }
     };
 
     // Check for initial URL
     Linking.getInitialURL().then(url => {
+      console.log('📱 Initial URL:', url);
       if (url) handleDeepLink(url);
     });
     
     // Listen for subsequent URLs
     const subscription = Linking.addEventListener('url', ({ url }) => {
+      console.log('🔔 URL event received:', url);
       handleDeepLink(url);
     });
     
@@ -196,11 +229,15 @@ export default function LoginScreen() {
   }, [login, router]);
 
   useEffect(() => {
-    if (isAuthenticated) router.replace('/(tabs)');
+    if (isAuthenticated) {
+      console.log('✅ User is authenticated, navigating to tabs');
+      router.replace('/(tabs)');
+    }
   }, [isAuthenticated, router]);
 
   const handleGoogleLogin = async () => {
     try {
+      console.log('🚀 Starting Google login...');
       setIsLoading(true);
       setError(null);
       hasProcessed.current = false;
@@ -209,6 +246,8 @@ export default function LoginScreen() {
       const redirectUrl = Linking.createURL('auth-callback', {
         scheme: 'bizcorev2',
       });
+
+      console.log('📱 Redirect URL:', redirectUrl);
 
       // Start Supabase OAuth flow
       const { data, error } = await supabase.auth.signInWithOAuth({
@@ -219,23 +258,38 @@ export default function LoginScreen() {
         },
       });
 
-      if (error) throw error;
+      if (error) {
+        console.log('❌ Supabase OAuth error:', error);
+        throw error;
+      }
+
+      console.log('✅ Supabase OAuth URL generated:', data?.url);
 
       if (data?.url) {
         // Open the OAuth URL in the browser
+        console.log('🌐 Opening browser for OAuth...');
         const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
+
+        console.log('🌐 Browser result type:', result.type);
+        console.log('🌐 Browser result URL:', result.url);
 
         if (result.type === 'success' && result.url) {
           // The deep link handler will process the tokens
-          console.log('OAuth successful, processing deep link');
+          console.log('✅ OAuth successful, deep link handler should process tokens');
         } else if (result.type === 'cancel') {
+          console.log('❌ User cancelled sign-in');
           setError('Sign-in was cancelled');
+          setIsLoading(false);
+          hasProcessed.current = false;
+        } else {
+          console.log('❌ Unexpected browser result:', result.type);
+          setError('Authentication failed. Please try again.');
           setIsLoading(false);
           hasProcessed.current = false;
         }
       }
     } catch (err: any) {
-      console.error('Google login error:', err);
+      console.error('❌ Google login error:', err);
       setError(err.message || 'Authentication failed');
       setIsLoading(false);
       hasProcessed.current = false;
