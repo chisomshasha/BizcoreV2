@@ -57,7 +57,9 @@ const EDGES = [
   { left: 47.35,  top: 66.5,  angle: '-30deg' },
 ];
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcore-v2.fly.dev';
+// FIX: reads EXPO_PUBLIC_BACKEND_URL (set in .env); fallback now matches
+// the actual Fly.io app name "bizcorev2" (no hyphen)
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcorev2.fly.dev';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -78,48 +80,62 @@ export default function LoginScreen() {
       Animated.timing(fadeAnim,  { toValue: 1, duration: 900, useNativeDriver: true }),
       Animated.timing(slideAnim, { toValue: 0, duration: 900, useNativeDriver: true }),
     ]).start();
-
     Animated.loop(Animated.sequence([
       Animated.timing(pulseAnim, { toValue: 1.06, duration: 2000, useNativeDriver: true }),
       Animated.timing(pulseAnim, { toValue: 1,    duration: 2000, useNativeDriver: true }),
     ])).start();
-
     Animated.loop(Animated.sequence([
       Animated.timing(glowAnim, { toValue: 1, duration: 2500, useNativeDriver: true }),
       Animated.timing(glowAnim, { toValue: 0, duration: 2500, useNativeDriver: true }),
     ])).start();
-
     Animated.loop(Animated.sequence([
       Animated.timing(orb1Anim, { toValue: 1, duration: 4000, useNativeDriver: true }),
       Animated.timing(orb1Anim, { toValue: 0, duration: 4000, useNativeDriver: true }),
     ])).start();
-
     Animated.loop(Animated.sequence([
       Animated.timing(orb2Anim, { toValue: 1, duration: 5500, useNativeDriver: true }),
       Animated.timing(orb2Anim, { toValue: 0, duration: 5500, useNativeDriver: true }),
     ])).start();
   }, []);
 
-  // ─── FIX: handleDeepLink is now a useCallback at component scope ─────────
-  // so it can be called both from the Linking listener AND directly from
-  // handleGoogleLogin when openAuthSessionAsync returns result.url.
+  // ─────────────────────────────────────────────────────────────────────────
+  // handleDeepLink — useCallback so it can be called from handleGoogleLogin
+  // AND from the Linking event listener (covers both Android paths).
+  //
+  // FIX: Supabase may deliver tokens as a hash fragment OR as query params
+  // depending on the PKCE flow / redirect configuration.  We check both.
+  // ─────────────────────────────────────────────────────────────────────────
   const handleDeepLink = useCallback(async (url: string) => {
     console.log('🔗 Deep link received:', url);
     if (hasProcessed.current) return;
 
-    // Supabase sends tokens in the hash fragment: #access_token=...
+    // --- parse tokens: try hash first, then query string ---
+    let accessToken: string | null = null;
+    let refreshToken: string | null = null;
+    let errorDescription: string | null = null;
+
     const hashIndex = url.indexOf('#');
-    console.log('📝 Hash index:', hashIndex);
-    if (hashIndex === -1) return;
+    if (hashIndex !== -1) {
+      const p = new URLSearchParams(url.substring(hashIndex + 1));
+      accessToken      = p.get('access_token');
+      refreshToken     = p.get('refresh_token');
+      errorDescription = p.get('error_description');
+    }
 
-    const params = new URLSearchParams(url.substring(hashIndex + 1));
-    const accessToken       = params.get('access_token');
-    const refreshToken      = params.get('refresh_token');
-    const errorDescription  = params.get('error_description');
+    // Fallback: tokens in query string (e.g. PKCE code exchange redirect)
+    if (!accessToken) {
+      const qIndex = url.indexOf('?');
+      if (qIndex !== -1) {
+        const p = new URLSearchParams(url.substring(qIndex + 1));
+        accessToken      = p.get('access_token');
+        refreshToken     = p.get('refresh_token');
+        errorDescription = p.get('error_description');
+      }
+    }
 
-    console.log('🔑 Access token present:', !!accessToken);
-    console.log('🔄 Refresh token present:', !!refreshToken);
-    console.log('❌ Error:', errorDescription);
+    console.log('🔑 access_token present:', !!accessToken);
+    console.log('🔄 refresh_token present:', !!refreshToken);
+    if (errorDescription) console.warn('❌ OAuth error:', errorDescription);
 
     if (errorDescription) {
       setError(`Sign-in failed: ${decodeURIComponent(errorDescription)}`);
@@ -128,54 +144,59 @@ export default function LoginScreen() {
       return;
     }
 
-    if (accessToken && refreshToken) {
-      hasProcessed.current = true;
-      setIsLoading(true);
+    if (!accessToken || !refreshToken) {
+      // URL arrived but had no tokens — not the callback we're waiting for
+      return;
+    }
 
-      try {
-        const { data, error: sessionError } = await supabase.auth.setSession({
-          access_token:  accessToken,
-          refresh_token: refreshToken,
-        });
+    hasProcessed.current = true;
+    setIsLoading(true);
 
-        if (sessionError) throw sessionError;
+    try {
+      const { data, error: sessionError } = await supabase.auth.setSession({
+        access_token:  accessToken,
+        refresh_token: refreshToken,
+      });
+      if (sessionError) throw sessionError;
 
-        if (data.session) {
-          const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${data.session.access_token}`,
-              'Content-Type': 'application/json',
-            },
-          });
+      if (!data.session) throw new Error('No session returned from Supabase');
 
-          if (!verifyResponse.ok) {
-            const errorData = await verifyResponse.json();
-            throw new Error(errorData.detail || 'Backend verification failed');
-          }
+      console.log('✅ Supabase session set, verifying with backend...');
+      console.log('🌐 Backend URL:', BACKEND_URL);
 
-          const userData = await verifyResponse.json();
-          await login(data.session.access_token, userData.user);
-          router.replace('/(tabs)');
-        }
-      } catch (err: any) {
-        console.error('Login error:', err);
-        setError(err.message || 'Login failed');
-        setIsLoading(false);
-        hasProcessed.current = false;
+      const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${data.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!verifyResponse.ok) {
+        const errorData = await verifyResponse.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Backend error ${verifyResponse.status}`);
       }
+
+      const userData = await verifyResponse.json();
+      await login(data.session.access_token, userData.user);
+      console.log('✅ Login complete — navigating to dashboard');
+      router.replace('/(tabs)');
+    } catch (err: any) {
+      console.error('❌ Login error:', err);
+      setError(err.message || 'Login failed. Please try again.');
+      setIsLoading(false);
+      hasProcessed.current = false;
     }
   }, [login, router]);
 
-  // ─── Deep link listener (handles cold-start and background wakes) ─────────
+  // Linking listener — covers cold-start and background deep links
   useEffect(() => {
     Linking.getInitialURL().then(url => { if (url) handleDeepLink(url); });
-
     const subscription = Linking.addEventListener('url', ({ url }) => handleDeepLink(url));
     return () => subscription.remove();
   }, [handleDeepLink]);
 
-  // ─── Already authenticated → go to dashboard ─────────────────────────────
+  // Already authenticated → go to dashboard immediately
   useEffect(() => {
     if (isAuthenticated) router.replace('/(tabs)');
   }, [isAuthenticated, router]);
@@ -183,7 +204,8 @@ export default function LoginScreen() {
   // ─── Google OAuth entry point ─────────────────────────────────────────────
   const handleGoogleLogin = async () => {
     try {
-      console.log('🚀 Starting Google login...');
+      console.log('🚀 Starting Google OAuth...');
+      console.log('🌐 Using backend:', BACKEND_URL);
       setIsLoading(true);
       setError(null);
       hasProcessed.current = false;
@@ -200,27 +222,30 @@ export default function LoginScreen() {
       });
 
       if (error) throw error;
+      if (!data?.url) throw new Error('No OAuth URL returned from Supabase');
 
-      if (data?.url) {
-        console.log('🌐 Opening browser for OAuth...');
-        const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
-        console.log('🌐 Browser result:', result.type);
+      console.log('🌐 Opening browser for OAuth...');
+      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
+      console.log('🌐 Browser result type:', result.type);
 
-        if (result.type === 'success' && result.url) {
-          // ─── FIX: process the URL directly here ──────────────────────────
-          // On Android the Linking event does NOT fire after
-          // openAuthSessionAsync — the URL is only available via result.url.
-          // Calling handleDeepLink here guarantees tokens are always processed.
-          console.log('✅ OAuth successful, processing token from result.url');
-          await handleDeepLink(result.url);
-        } else if (result.type === 'cancel') {
-          setError('Sign-in was cancelled');
-          setIsLoading(false);
-          hasProcessed.current = false;
-        } else {
-          // dismiss / unknown — stop spinner so the user can retry
-          setIsLoading(false);
-        }
+      if (result.type === 'success' && result.url) {
+        // Primary path: browser closed with our redirect URL
+        // On Android, Linking events often do NOT fire after openAuthSessionAsync —
+        // result.url is the only reliable delivery mechanism.
+        await handleDeepLink(result.url);
+      } else if (result.type === 'cancel') {
+        setError('Sign-in was cancelled');
+        setIsLoading(false);
+        hasProcessed.current = false;
+      } else {
+        // 'dismiss' — browser closed without completing the redirect.
+        // Most common cause: bizcorev2://auth-callback is NOT listed in
+        // Supabase dashboard → Authentication → URL Configuration → Redirect URLs.
+        // Add it there, then rebuild.
+        console.warn('⚠️ Browser dismissed without redirect. Check Supabase Redirect URLs.');
+        setError('Sign-in did not complete. Ensure bizcorev2://auth-callback is added to your Supabase Redirect URLs.');
+        setIsLoading(false);
+        hasProcessed.current = false;
       }
     } catch (err: any) {
       console.error('Google login error:', err);
@@ -230,9 +255,9 @@ export default function LoginScreen() {
     }
   };
 
-  const orb1Y        = orb1Anim.interpolate({ inputRange: [0, 1], outputRange: [0, -28] });
-  const orb2Y        = orb2Anim.interpolate({ inputRange: [0, 1], outputRange: [0,  22] });
-  const edgeOpacity  = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.8] });
+  const orb1Y       = orb1Anim.interpolate({ inputRange: [0, 1], outputRange: [0, -28] });
+  const orb2Y       = orb2Anim.interpolate({ inputRange: [0, 1], outputRange: [0,  22] });
+  const edgeOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.8] });
 
   return (
     <View style={styles.root}>
@@ -313,27 +338,27 @@ export default function LoginScreen() {
 }
 
 const styles = StyleSheet.create({
-  root:         { flex: 1, backgroundColor: '#06060E' },
-  safe:         { flex: 1 },
-  content:      { flex: 1, paddingHorizontal: 20, justifyContent: 'space-between', paddingVertical: 20 },
-  orb1:         { position: 'absolute', top: -80, right: -80, width: 280, height: 280, borderRadius: 140, overflow: 'hidden' },
-  orb2:         { position: 'absolute', bottom: 60, left: -100, width: 260, height: 260, borderRadius: 130, overflow: 'hidden' },
-  orbFill:      { flex: 1 },
-  taglineRow:   { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 8 },
-  taglineLine:  { flex: 1, height: 1, backgroundColor: '#2A2A3E' },
-  tagline:      { fontSize: 12, color: Colors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' },
-  hexContainer: { width: HEX_SIZE, height: HEX_SIZE, alignSelf: 'center', position: 'relative' },
-  hexEdge:      { position: 'absolute', width: HEX_R, height: 1.5, backgroundColor: '#6366F1', borderRadius: 1 },
-  spoke:        { position: 'absolute', height: 1, backgroundColor: '#6366F144', borderRadius: 1 },
-  chip:         { position: 'absolute', width: CHIP_W, height: CHIP_H, borderRadius: 14, borderWidth: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
-  chipLabel:    { fontSize: 11, fontWeight: '600', letterSpacing: 0.2 },
-  logoWrapper:  { position: 'absolute', left: HEX_CX - 58, top: HEX_CY - 58, width: 116, height: 116, alignItems: 'center', justifyContent: 'center' },
-  glowRing:     { position: 'absolute', width: 116, height: 116, borderRadius: 58, borderWidth: 1, borderColor: '#6366F166', backgroundColor: '#6366F108' },
-  logoImage:    { width: 90, height: 90 },
-  signIn:       { gap: 10 },
-  errorBox:     { flexDirection: 'row', alignItems: 'center', backgroundColor: `${Colors.danger}15`, borderWidth: 1, borderColor: `${Colors.danger}40`, padding: 12, borderRadius: 12, gap: 8 },
-  errorText:    { color: Colors.danger, fontSize: 13, flex: 1 },
-  googleBtn:    { borderRadius: 14, borderWidth: 1, borderColor: '#2A2A3E', overflow: 'hidden' },
+  root:           { flex: 1, backgroundColor: '#06060E' },
+  safe:           { flex: 1 },
+  content:        { flex: 1, paddingHorizontal: 20, justifyContent: 'space-between', paddingVertical: 20 },
+  orb1:           { position: 'absolute', top: -80, right: -80, width: 280, height: 280, borderRadius: 140, overflow: 'hidden' },
+  orb2:           { position: 'absolute', bottom: 60, left: -100, width: 260, height: 260, borderRadius: 130, overflow: 'hidden' },
+  orbFill:        { flex: 1 },
+  taglineRow:     { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 8 },
+  taglineLine:    { flex: 1, height: 1, backgroundColor: '#2A2A3E' },
+  tagline:        { fontSize: 12, color: Colors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' },
+  hexContainer:   { width: HEX_SIZE, height: HEX_SIZE, alignSelf: 'center', position: 'relative' },
+  hexEdge:        { position: 'absolute', width: HEX_R, height: 1.5, backgroundColor: '#6366F1', borderRadius: 1 },
+  spoke:          { position: 'absolute', height: 1, backgroundColor: '#6366F144', borderRadius: 1 },
+  chip:           { position: 'absolute', width: CHIP_W, height: CHIP_H, borderRadius: 14, borderWidth: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  chipLabel:      { fontSize: 11, fontWeight: '600', letterSpacing: 0.2 },
+  logoWrapper:    { position: 'absolute', left: HEX_CX - 58, top: HEX_CY - 58, width: 116, height: 116, alignItems: 'center', justifyContent: 'center' },
+  glowRing:       { position: 'absolute', width: 116, height: 116, borderRadius: 58, borderWidth: 1, borderColor: '#6366F166', backgroundColor: '#6366F108' },
+  logoImage:      { width: 90, height: 90 },
+  signIn:         { gap: 10 },
+  errorBox:       { flexDirection: 'row', alignItems: 'center', backgroundColor: `${Colors.danger}15`, borderWidth: 1, borderColor: `${Colors.danger}40`, padding: 12, borderRadius: 12, gap: 8 },
+  errorText:      { color: Colors.danger, fontSize: 13, flex: 1 },
+  googleBtn:      { borderRadius: 14, borderWidth: 1, borderColor: '#2A2A3E', overflow: 'hidden' },
   googleBtnInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 16 },
   googleIconBox:  { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFFFFF08', borderWidth: 1, borderColor: '#FFFFFF12', justifyContent: 'center', alignItems: 'center' },
   googleBtnText:  { fontSize: 16, fontWeight: '600', color: '#FFFFFF', flex: 1, marginLeft: 12 },
