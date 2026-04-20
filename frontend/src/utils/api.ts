@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // Priority:
 // 1. EXPO_PUBLIC_BACKEND_URL from .env or EAS Build secrets (recommended for production)
 // 2. Fallback (you can set a sensible default)
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcore-v2.fly.dev';   // ← Update this with your actual Fly.io URL
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcorev2.fly.dev';   // ← Update this with your actual Fly.io URL
 
 const api = axios.create({
   baseURL: `${BACKEND_URL}/api`,
