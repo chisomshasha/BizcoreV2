@@ -23,7 +23,6 @@ const { width, height } = Dimensions.get('window');
 
 WebBrowser.maybeCompleteAuthSession();
 
-// ─── Hexagon geometry ────────────────────────────────────────────────────────
 const HEX_R    = 110;
 const HEX_CX   = 150;
 const HEX_CY   = 150;
@@ -57,8 +56,6 @@ const EDGES = [
   { left: 47.35,  top: 66.5,  angle: '-30deg' },
 ];
 
-// FIX: reads EXPO_PUBLIC_BACKEND_URL (set in .env); fallback now matches
-// the actual Fly.io app name "bizcorev2" (no hyphen)
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcorev2.fly.dev';
 
 export default function LoginScreen() {
@@ -98,71 +95,14 @@ export default function LoginScreen() {
     ])).start();
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // handleDeepLink — useCallback so it can be called from handleGoogleLogin
-  // AND from the Linking event listener (covers both Android paths).
-  //
-  // FIX: Supabase may deliver tokens as a hash fragment OR as query params
-  // depending on the PKCE flow / redirect configuration.  We check both.
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleDeepLink = useCallback(async (url: string) => {
-    console.log('🔗 Deep link received:', url);
-    if (hasProcessed.current) return;
-
-    // --- parse tokens: try hash first, then query string ---
-    let accessToken: string | null = null;
-    let refreshToken: string | null = null;
-    let errorDescription: string | null = null;
-
-    const hashIndex = url.indexOf('#');
-    if (hashIndex !== -1) {
-      const p = new URLSearchParams(url.substring(hashIndex + 1));
-      accessToken      = p.get('access_token');
-      refreshToken     = p.get('refresh_token');
-      errorDescription = p.get('error_description');
-    }
-
-    // Fallback: tokens in query string (e.g. PKCE code exchange redirect)
-    if (!accessToken) {
-      const qIndex = url.indexOf('?');
-      if (qIndex !== -1) {
-        const p = new URLSearchParams(url.substring(qIndex + 1));
-        accessToken      = p.get('access_token');
-        refreshToken     = p.get('refresh_token');
-        errorDescription = p.get('error_description');
-      }
-    }
-
-    console.log('🔑 access_token present:', !!accessToken);
-    console.log('🔄 refresh_token present:', !!refreshToken);
-    if (errorDescription) console.warn('❌ OAuth error:', errorDescription);
-
-    if (errorDescription) {
-      setError(`Sign-in failed: ${decodeURIComponent(errorDescription)}`);
-      setIsLoading(false);
-      hasProcessed.current = false;
-      return;
-    }
-
-    if (!accessToken || !refreshToken) {
-      // URL arrived but had no tokens — not the callback we're waiting for
-      return;
-    }
-
-    hasProcessed.current = true;
-    setIsLoading(true);
-
+  const processTokens = useCallback(async (accessToken: string, refreshToken: string) => {
     try {
       const { data, error: sessionError } = await supabase.auth.setSession({
         access_token:  accessToken,
         refresh_token: refreshToken,
       });
       if (sessionError) throw sessionError;
-
       if (!data.session) throw new Error('No session returned from Supabase');
-
-      console.log('✅ Supabase session set, verifying with backend...');
-      console.log('🌐 Backend URL:', BACKEND_URL);
 
       const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
         method: 'POST',
@@ -173,45 +113,121 @@ export default function LoginScreen() {
       });
 
       if (!verifyResponse.ok) {
-        const errorData = await verifyResponse.json().catch(() => ({}));
-        throw new Error(errorData.detail || `Backend error ${verifyResponse.status}`);
+        const errData = await verifyResponse.json().catch(() => ({}));
+        throw new Error(errData.detail || `Verify failed (${verifyResponse.status})`);
       }
 
       const userData = await verifyResponse.json();
       await login(data.session.access_token, userData.user);
-      console.log('✅ Login complete — navigating to dashboard');
       router.replace('/(tabs)');
     } catch (err: any) {
-      console.error('❌ Login error:', err);
+      console.error('processTokens error:', err);
       setError(err.message || 'Login failed. Please try again.');
       setIsLoading(false);
       hasProcessed.current = false;
     }
   }, [login, router]);
 
-  // Linking listener — covers cold-start and background deep links
+  const processCode = useCallback(async (code: string) => {
+    try {
+      // PKCE flow: exchange one-time code for a session
+      const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+      if (exchangeError) throw exchangeError;
+      if (!data.session) throw new Error('No session from code exchange');
+
+      const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${data.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!verifyResponse.ok) {
+        const errData = await verifyResponse.json().catch(() => ({}));
+        throw new Error(errData.detail || `Verify failed (${verifyResponse.status})`);
+      }
+
+      const userData = await verifyResponse.json();
+      await login(data.session.access_token, userData.user);
+      router.replace('/(tabs)');
+    } catch (err: any) {
+      console.error('processCode error:', err);
+      setError(err.message || 'Login failed. Please try again.');
+      setIsLoading(false);
+      hasProcessed.current = false;
+    }
+  }, [login, router]);
+
+  // Handles both implicit (#access_token=...) and PKCE (?code=...) redirects
+  const handleDeepLink = useCallback(async (url: string) => {
+    console.log('🔗 Redirect URL received:', url);
+    if (hasProcessed.current) return;
+
+    // 1. Try hash fragment — implicit flow: #access_token=...&refresh_token=...
+    const hashIndex = url.indexOf('#');
+    if (hashIndex !== -1) {
+      const p = new URLSearchParams(url.substring(hashIndex + 1));
+      const at = p.get('access_token');
+      const rt = p.get('refresh_token');
+      const err = p.get('error_description');
+      if (err) {
+        setError(`Sign-in failed: ${decodeURIComponent(err)}`);
+        setIsLoading(false);
+        return;
+      }
+      if (at && rt) {
+        console.log('✅ Implicit flow — tokens in hash');
+        hasProcessed.current = true;
+        setIsLoading(true);
+        await processTokens(at, rt);
+        return;
+      }
+    }
+
+    // 2. Try query string — PKCE flow: ?code=...
+    const qIndex = url.indexOf('?');
+    if (qIndex !== -1) {
+      const p = new URLSearchParams(url.substring(qIndex + 1));
+      const code = p.get('code');
+      const err  = p.get('error_description');
+      if (err) {
+        setError(`Sign-in failed: ${decodeURIComponent(err)}`);
+        setIsLoading(false);
+        return;
+      }
+      if (code) {
+        console.log('✅ PKCE flow — exchanging code for session');
+        hasProcessed.current = true;
+        setIsLoading(true);
+        await processCode(code);
+        return;
+      }
+    }
+
+    console.log('⚠️ Redirect URL had no tokens or code — ignoring');
+  }, [processTokens, processCode]);
+
+  // Cold-start and background deep link listener
   useEffect(() => {
     Linking.getInitialURL().then(url => { if (url) handleDeepLink(url); });
-    const subscription = Linking.addEventListener('url', ({ url }) => handleDeepLink(url));
-    return () => subscription.remove();
+    const sub = Linking.addEventListener('url', ({ url }) => handleDeepLink(url));
+    return () => sub.remove();
   }, [handleDeepLink]);
 
-  // Already authenticated → go to dashboard immediately
   useEffect(() => {
     if (isAuthenticated) router.replace('/(tabs)');
   }, [isAuthenticated, router]);
 
-  // ─── Google OAuth entry point ─────────────────────────────────────────────
   const handleGoogleLogin = async () => {
     try {
-      console.log('🚀 Starting Google OAuth...');
-      console.log('🌐 Using backend:', BACKEND_URL);
       setIsLoading(true);
       setError(null);
       hasProcessed.current = false;
 
       const redirectUrl = Linking.createURL('auth-callback', { scheme: 'bizcorev2' });
-      console.log('📱 Redirect URL:', redirectUrl);
+      console.log('📱 OAuth redirect URL:', redirectUrl);
+      console.log('🌐 Backend URL:', BACKEND_URL);
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -222,28 +238,20 @@ export default function LoginScreen() {
       });
 
       if (error) throw error;
-      if (!data?.url) throw new Error('No OAuth URL returned from Supabase');
+      if (!data?.url) throw new Error('No OAuth URL from Supabase');
 
-      console.log('🌐 Opening browser for OAuth...');
       const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
-      console.log('🌐 Browser result type:', result.type);
+      console.log('🌐 Browser result:', result.type);
 
       if (result.type === 'success' && result.url) {
-        // Primary path: browser closed with our redirect URL
-        // On Android, Linking events often do NOT fire after openAuthSessionAsync —
-        // result.url is the only reliable delivery mechanism.
         await handleDeepLink(result.url);
       } else if (result.type === 'cancel') {
-        setError('Sign-in was cancelled');
+        setError('Sign-in was cancelled.');
         setIsLoading(false);
         hasProcessed.current = false;
       } else {
-        // 'dismiss' — browser closed without completing the redirect.
-        // Most common cause: bizcorev2://auth-callback is NOT listed in
-        // Supabase dashboard → Authentication → URL Configuration → Redirect URLs.
-        // Add it there, then rebuild.
-        console.warn('⚠️ Browser dismissed without redirect. Check Supabase Redirect URLs.');
-        setError('Sign-in did not complete. Ensure bizcorev2://auth-callback is added to your Supabase Redirect URLs.');
+        // 'dismiss' — browser closed without redirect
+        setError('Sign-in did not complete. Please try again.');
         setIsLoading(false);
         hasProcessed.current = false;
       }
@@ -262,7 +270,6 @@ export default function LoginScreen() {
   return (
     <View style={styles.root}>
       <LinearGradient colors={['#06060E', '#0D0D1C', '#06060E']} style={StyleSheet.absoluteFill} />
-
       <Animated.View style={[styles.orb1, { transform: [{ translateY: orb1Y }] }]}>
         <LinearGradient colors={['#6366F155', '#6366F100']} style={styles.orbFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} />
       </Animated.View>
