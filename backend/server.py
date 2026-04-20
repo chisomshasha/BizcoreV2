@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from supabase import create_client, Client
 from fastapi import Header, HTTPException, Depends
 import jwt  # pip install PyJWT
+import bcrypt
 import os
 import logging
 import httpx
@@ -30,10 +30,10 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 
-# Supabase Configuration
-SUPABASE_URL = "https://bffpwkgtuukmldwtujxq.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_S7HNPHpqB3bDOPeGhX1yzg_PiPdkynw"
-supabase_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+# JWT Configuration — set JWT_SECRET in your Railway/fly.io environment variables
+JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_urlsafe(48))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 7
 
 # PDF Generation imports
 try:
@@ -270,18 +270,20 @@ class User(BaseModel):
     user_id: str
     email: str
     name: str
+    username: Optional[str] = None
     picture: Optional[str] = None
     role: UserRole = UserRole.VIEWER
     company_id: Optional[str] = None
     phone: Optional[str] = None
-    warehouse_id: Optional[str] = None          # NEW: assigned warehouse
-    warehouse_name: Optional[str] = None         # NEW: denormalised for display
+    warehouse_id: Optional[str] = None
+    warehouse_name: Optional[str] = None
     is_active: bool = True
-    is_invited: bool = False                     # NEW: SuperAdmin pre-created user
-    debt_ceiling: float = 0.0                   # NEW: for sales_rep role
-    is_flagged: bool = False                    # NEW: auto-set when outstanding >= ceiling
+    is_invited: bool = False
+    debt_ceiling: float = 0.0
+    is_flagged: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # password_hash is intentionally excluded from serialisation — never sent to client
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -292,10 +294,28 @@ class UserUpdate(BaseModel):
     debt_ceiling: Optional[float] = None
 
 class UserCreate(BaseModel):
-    """SuperAdmin creates a user before their first login"""
+    """SuperAdmin creates an employee account with a username and temporary password."""
     name: str
     email: str
     phone: str
+    username: str
+    password: str                           # plaintext — hashed before storage
+    role: UserRole = UserRole.VIEWER
+    warehouse_id: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str                           # username or email
+    password: str
+
+
+class CreateEmployeeRequest(BaseModel):
+    """SuperAdmin/CEO creates an employee account."""
+    name: str
+    email: str
+    phone: str
+    username: str
+    password: str
     role: UserRole = UserRole.VIEWER
     warehouse_id: Optional[str] = None
 
@@ -891,29 +911,29 @@ class DashboardStats(BaseModel):
 # ========================
 
 async def get_current_user(authorization: str = Header(...)) -> User:
-    """Dependency to get current user from Supabase token"""
+    """Dependency: validates our own JWT and returns the User from MongoDB."""
     if authorization.startswith("Bearer "):
         token = authorization[7:]
     else:
         token = authorization
 
     try:
-        user_response = supabase_client.auth.get_user(token)
-        if not user_response or not user_response.user:
-            raise HTTPException(401, "Invalid token")
-
-        email = user_response.user.email
-        user = await db.users.find_one({"email": email}, {"_id": 0})
-        if not user:
-            raise HTTPException(401, "User not found in database")
-        if not user.get("is_active", True):
-            raise HTTPException(401, "Account disabled")
-
-        return User(**user)
-    except HTTPException:
-        raise
-    except Exception:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id: str = payload.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not user.get("is_active", True):
+        raise HTTPException(status_code=401, detail="Account disabled")
+
+    return User(**user)
 
 async def get_optional_user(request: Request) -> Optional[User]:
     """Get current user if authenticated, None otherwise"""
@@ -1009,70 +1029,132 @@ async def recalculate_agent_flag(sales_rep_id: str):
 # AUTH ENDPOINTS
 # ========================
 
-@api_router.post("/auth/verify")
-async def verify_supabase_token(token: str = Header(..., alias="Authorization")):
+@api_router.post("/auth/login")
+@limiter.limit("10/minute")
+async def login(request: Request, body: LoginRequest):
     """
-    Verify a Supabase JWT token and return/create the user in your database.
-    The frontend sends: Authorization: Bearer <supabase_access_token>
+    Authenticate with username/email + password.
+    Returns a signed JWT the frontend stores and sends as Bearer token.
+    Rate limited: 10/minute to prevent brute-force.
     """
-    # Remove "Bearer " prefix if present
-    if token.startswith("Bearer "):
-        token = token[7:]
+    identifier = body.username.strip().lower()
 
+    # Allow login by username OR email
+    user_doc = await db.users.find_one(
+        {"$or": [{"username": identifier}, {"email": identifier}]},
+        {"_id": 0}
+    )
+
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not user_doc.get("is_active", True):
+        raise HTTPException(status_code=401, detail="Account disabled. Contact your administrator.")
+
+    stored_hash = user_doc.get("password_hash", "")
+    if not stored_hash:
+        raise HTTPException(status_code=401, detail="Account not configured for password login")
+
+    # Verify password
     try:
-        # Verify the token with Supabase
-        user_response = supabase_client.auth.get_user(token)
+        password_matches = bcrypt.checkpw(
+            body.password.encode("utf-8"),
+            stored_hash.encode("utf-8")
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-        if not user_response or not user_response.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
+    if not password_matches:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-        supabase_user = user_response.user
-        email = supabase_user.email
-        name = supabase_user.user_metadata.get("full_name", email)
-        picture = supabase_user.user_metadata.get("avatar_url", "")
+    # Issue JWT
+    expiry = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS)
+    token = jwt.encode(
+        {"user_id": user_doc["user_id"], "exp": expiry},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
 
-        # Find or create user in your MongoDB
-        existing = await db.users.find_one({"email": email})
+    # Strip password_hash before returning user object
+    user_doc.pop("password_hash", None)
+    return {"token": token, "user": user_doc}
 
-        if existing:
-            user_id = existing["user_id"]
-            # Update name/picture if changed
-            await db.users.update_one(
-                {"user_id": user_id},
-                {"$set": {
-                    "name": name,
-                    "picture": picture,
-                    "updated_at": datetime.now(timezone.utc)
-                }}
-            )
-        else:
-            # Create new user (first user becomes super_admin)
-            user_count = await db.users.count_documents({})
-            user_id = f"user_{uuid.uuid4().hex[:12]}"
-            user_doc = {
-                "user_id": user_id,
-                "email": email,
-                "name": name,
-                "picture": picture,
-                "role": "super_admin" if user_count == 0 else "viewer",
-                "is_active": True,
-                "is_invited": False,
-                "debt_ceiling": 0.0,
-                "is_flagged": False,
-                "created_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc),
-            }
-            await db.users.insert_one(user_doc)
 
-        # Return user info to frontend
-        user = await db.users.find_one({"email": email}, {"_id": 0})
-        return {"user": user, "supabase_token": token}
+@api_router.post("/auth/create-employee")
+@limiter.limit("20/minute")
+async def create_employee(
+    request: Request,
+    body: CreateEmployeeRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    SuperAdmin / CEO creates an employee account with a username + password.
+    Only super_admin may call this endpoint.
+    Rate limited: 20/minute.
+    """
+    if current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only SuperAdmin can create employee accounts")
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Token verification failed: {e}")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    sanitized_email    = body.email.strip().lower()
+    sanitized_username = body.username.strip().lower()
+    sanitized_name     = sanitize_string(body.name)
+    sanitized_phone    = sanitize_string(body.phone)
+
+    if not sanitized_phone:
+        raise HTTPException(status_code=422, detail="Phone number is required")
+
+    # Uniqueness checks
+    if await db.users.find_one({"email": sanitized_email}):
+        raise HTTPException(status_code=400, detail="Email already in use")
+    if await db.users.find_one({"username": sanitized_username}):
+        raise HTTPException(status_code=400, detail="Username already taken")
+
+    # Validate password strength
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+
+    # Resolve warehouse
+    wh_name = None
+    if body.warehouse_id:
+        wh = await db.warehouses.find_one({"warehouse_id": body.warehouse_id}, {"_id": 0})
+        if not wh:
+            raise HTTPException(status_code=404, detail="Warehouse not found")
+        wh_name = wh["name"]
+
+    # Hash password
+    password_hash = bcrypt.hashpw(
+        body.password.encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+
+    new_user_id = f"user_{uuid.uuid4().hex[:12]}"
+    user_doc = {
+        "user_id":       new_user_id,
+        "email":         sanitized_email,
+        "username":      sanitized_username,
+        "name":          sanitized_name,
+        "phone":         sanitized_phone,
+        "password_hash": password_hash,
+        "role":          body.role.value,
+        "warehouse_id":  body.warehouse_id,
+        "warehouse_name": wh_name,
+        "is_active":     True,
+        "is_invited":    True,
+        "debt_ceiling":  0.0,
+        "is_flagged":    False,
+        "created_at":    datetime.now(timezone.utc),
+        "updated_at":    datetime.now(timezone.utc),
+    }
+    await db.users.insert_one(user_doc)
+    await create_audit_log(
+        current_user.user_id, "create", "user", new_user_id,
+        new_value={"email": sanitized_email, "username": sanitized_username, "role": body.role.value},
+        request=request,
+    )
+
+    # Never return the hash to the client
+    user_doc.pop("password_hash", None)
+    user_doc.pop("_id", None)
+    return {**user_doc, "message": "Employee account created successfully."}
 
 @api_router.post("/auth/rotate-session")
 @limiter.limit("5/minute")
@@ -1144,21 +1226,25 @@ async def get_users(request: Request, user: User = Depends(get_current_user)):
 @api_router.post("/users/create")
 @limiter.limit("20/minute")
 async def create_user(request: Request, user_data: UserCreate, current_user: User = Depends(get_current_user)):
-    """SuperAdmin creates a user — Name, Email, Phone required. Rate limited: 20/minute."""
+    """SuperAdmin creates an employee account. Rate limited: 20/minute."""
     if current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Only SuperAdmin can create users")
 
-    sanitized_email = sanitize_string(user_data.email.lower())
-    sanitized_name = sanitize_string(user_data.name)
-    sanitized_phone = sanitize_string(user_data.phone)
+    sanitized_email    = sanitize_string(user_data.email.lower())
+    sanitized_username = user_data.username.strip().lower()
+    sanitized_name     = sanitize_string(user_data.name)
+    sanitized_phone    = sanitize_string(user_data.phone)
 
-    # Validate email uniqueness
-    existing = await db.users.find_one({"email": sanitized_email}, {"_id": 0})
-    if existing:
-        raise HTTPException(status_code=400, detail="A user with this email already exists")
-
-    if not sanitized_phone or not sanitized_phone.strip():
+    if not sanitized_phone:
         raise HTTPException(status_code=422, detail="Phone number is required when creating a user")
+    if len(user_data.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+
+    # Validate uniqueness
+    if await db.users.find_one({"email": sanitized_email}, {"_id": 0}):
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+    if await db.users.find_one({"username": sanitized_username}, {"_id": 0}):
+        raise HTTPException(status_code=400, detail="Username already taken")
 
     # Resolve warehouse name if provided
     wh_name = None
@@ -1168,27 +1254,35 @@ async def create_user(request: Request, user_data: UserCreate, current_user: Use
             raise HTTPException(status_code=404, detail="Warehouse not found")
         wh_name = wh["name"]
 
+    password_hash = bcrypt.hashpw(
+        user_data.password.encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+
     new_user_id = f"user_{uuid.uuid4().hex[:12]}"
     user_doc = {
-        "user_id": new_user_id,
-        "email": sanitized_email,
-        "name": sanitized_name,
-        "phone": sanitized_phone,
-        "role": user_data.role.value,
-        "warehouse_id": user_data.warehouse_id,
+        "user_id":       new_user_id,
+        "email":         sanitized_email,
+        "username":      sanitized_username,
+        "name":          sanitized_name,
+        "phone":         sanitized_phone,
+        "password_hash": password_hash,
+        "role":          user_data.role.value,
+        "warehouse_id":  user_data.warehouse_id,
         "warehouse_name": wh_name,
-        "is_active": True,
-        "is_invited": True,
-        "debt_ceiling": 0.0,
-        "is_flagged": False,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "is_active":     True,
+        "is_invited":    True,
+        "debt_ceiling":  0.0,
+        "is_flagged":    False,
+        "created_at":    datetime.now(timezone.utc),
+        "updated_at":    datetime.now(timezone.utc),
     }
     await db.users.insert_one(user_doc)
     await create_audit_log(current_user.user_id, "create", "user", new_user_id,
-                           new_value={"email": sanitized_email, "role": user_data.role.value},
+                           new_value={"email": sanitized_email, "username": sanitized_username, "role": user_data.role.value},
                            request=request)
-    return {**user_doc, "message": "User created. They can now login with their email."}
+    user_doc.pop("password_hash", None)
+    user_doc.pop("_id", None)
+    return {**user_doc, "message": "Employee account created. They can now login with their username and password."}
 
 # Role rank map used to prevent privilege escalation
 _ROLE_RANK: Dict[str, int] = {
