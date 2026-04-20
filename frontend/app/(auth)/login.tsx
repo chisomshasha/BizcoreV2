@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -8,20 +8,19 @@ import {
   ActivityIndicator,
   Animated,
   Image,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '../../src/components/ThemedComponents';
 import { useAuthStore } from '../../src/store/authStore';
-import { supabase } from '../../src/lib/supabase';
 
 const { width, height } = Dimensions.get('window');
-
-WebBrowser.maybeCompleteAuthSession();
 
 const HEX_R    = 110;
 const HEX_CX   = 150;
@@ -56,14 +55,15 @@ const EDGES = [
   { left: 47.35,  top: 66.5,  angle: '-30deg' },
 ];
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'https://bizcorev2.fly.dev';
-
 export default function LoginScreen() {
   const router = useRouter();
   const { login, isAuthenticated } = useAuthStore();
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const hasProcessed = useRef(false);
+
+  const [username, setUsername]         = useState('');
+  const [password, setPassword]         = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading]       = useState(false);
+  const [error, setError]               = useState<string | null>(null);
 
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(40)).current;
@@ -95,171 +95,27 @@ export default function LoginScreen() {
     ])).start();
   }, []);
 
-  const processTokens = useCallback(async (accessToken: string, refreshToken: string) => {
-    try {
-      const { data, error: sessionError } = await supabase.auth.setSession({
-        access_token:  accessToken,
-        refresh_token: refreshToken,
-      });
-      if (sessionError) throw sessionError;
-      if (!data.session) throw new Error('No session returned from Supabase');
-
-      const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${data.session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!verifyResponse.ok) {
-        const errData = await verifyResponse.json().catch(() => ({}));
-        throw new Error(errData.detail || `Verify failed (${verifyResponse.status})`);
-      }
-
-      const userData = await verifyResponse.json();
-      await login(data.session.access_token, userData.user);
-      router.replace('/(tabs)');
-    } catch (err: any) {
-      console.error('processTokens error:', err);
-      setError(err.message || 'Login failed. Please try again.');
-      setIsLoading(false);
-      hasProcessed.current = false;
-    }
-  }, [login, router]);
-
-  const processCode = useCallback(async (code: string) => {
-    try {
-      // PKCE flow: exchange one-time code for a session
-      const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-      if (exchangeError) throw exchangeError;
-      if (!data.session) throw new Error('No session from code exchange');
-
-      const verifyResponse = await fetch(`${BACKEND_URL}/api/auth/verify`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${data.session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!verifyResponse.ok) {
-        const errData = await verifyResponse.json().catch(() => ({}));
-        throw new Error(errData.detail || `Verify failed (${verifyResponse.status})`);
-      }
-
-      const userData = await verifyResponse.json();
-      await login(data.session.access_token, userData.user);
-      router.replace('/(tabs)');
-    } catch (err: any) {
-      console.error('processCode error:', err);
-      setError(err.message || 'Login failed. Please try again.');
-      setIsLoading(false);
-      hasProcessed.current = false;
-    }
-  }, [login, router]);
-
-  // Handles both implicit (#access_token=...) and PKCE (?code=...) redirects
-  const handleDeepLink = useCallback(async (url: string) => {
-    console.log('🔗 Redirect URL received:', url);
-    if (hasProcessed.current) return;
-
-    // 1. Try hash fragment — implicit flow: #access_token=...&refresh_token=...
-    const hashIndex = url.indexOf('#');
-    if (hashIndex !== -1) {
-      const p = new URLSearchParams(url.substring(hashIndex + 1));
-      const at = p.get('access_token');
-      const rt = p.get('refresh_token');
-      const err = p.get('error_description');
-      if (err) {
-        setError(`Sign-in failed: ${decodeURIComponent(err)}`);
-        setIsLoading(false);
-        return;
-      }
-      if (at && rt) {
-        console.log('✅ Implicit flow — tokens in hash');
-        hasProcessed.current = true;
-        setIsLoading(true);
-        await processTokens(at, rt);
-        return;
-      }
-    }
-
-    // 2. Try query string — PKCE flow: ?code=...
-    const qIndex = url.indexOf('?');
-    if (qIndex !== -1) {
-      const p = new URLSearchParams(url.substring(qIndex + 1));
-      const code = p.get('code');
-      const err  = p.get('error_description');
-      if (err) {
-        setError(`Sign-in failed: ${decodeURIComponent(err)}`);
-        setIsLoading(false);
-        return;
-      }
-      if (code) {
-        console.log('✅ PKCE flow — exchanging code for session');
-        hasProcessed.current = true;
-        setIsLoading(true);
-        await processCode(code);
-        return;
-      }
-    }
-
-    console.log('⚠️ Redirect URL had no tokens or code — ignoring');
-  }, [processTokens, processCode]);
-
-  // Cold-start and background deep link listener
-  useEffect(() => {
-    Linking.getInitialURL().then(url => { if (url) handleDeepLink(url); });
-    const sub = Linking.addEventListener('url', ({ url }) => handleDeepLink(url));
-    return () => sub.remove();
-  }, [handleDeepLink]);
-
   useEffect(() => {
     if (isAuthenticated) router.replace('/(tabs)');
   }, [isAuthenticated, router]);
 
-  const handleGoogleLogin = async () => {
+  const handleLogin = async () => {
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername) { setError('Please enter your username or email.'); return; }
+    if (!password)         { setError('Please enter your password.');         return; }
+    setError(null);
+    setIsLoading(true);
     try {
-      setIsLoading(true);
-      setError(null);
-      hasProcessed.current = false;
-
-      const redirectUrl = Linking.createURL('auth-callback', { scheme: 'bizcorev2' });
-      console.log('📱 OAuth redirect URL:', redirectUrl);
-      console.log('🌐 Backend URL:', BACKEND_URL);
-
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: redirectUrl,
-          skipBrowserRedirect: true,
-        },
-      });
-
-      if (error) throw error;
-      if (!data?.url) throw new Error('No OAuth URL from Supabase');
-
-      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
-      console.log('🌐 Browser result:', result.type);
-
-      if (result.type === 'success' && result.url) {
-        await handleDeepLink(result.url);
-      } else if (result.type === 'cancel') {
-        setError('Sign-in was cancelled.');
-        setIsLoading(false);
-        hasProcessed.current = false;
-      } else {
-        // 'dismiss' — browser closed without redirect
-        setError('Sign-in did not complete. Please try again.');
-        setIsLoading(false);
-        hasProcessed.current = false;
-      }
+      await login(trimmedUsername, password);
+      router.replace('/(tabs)');
     } catch (err: any) {
-      console.error('Google login error:', err);
-      setError(err.message || 'Authentication failed');
+      const msg =
+        err?.response?.data?.detail ||
+        err?.message ||
+        'Login failed. Please check your credentials.';
+      setError(msg);
+    } finally {
       setIsLoading(false);
-      hasProcessed.current = false;
     }
   };
 
@@ -268,8 +124,12 @@ export default function LoginScreen() {
   const edgeOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.8] });
 
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView
+      style={styles.root}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <LinearGradient colors={['#06060E', '#0D0D1C', '#06060E']} style={StyleSheet.absoluteFill} />
+
       <Animated.View style={[styles.orb1, { transform: [{ translateY: orb1Y }] }]}>
         <LinearGradient colors={['#6366F155', '#6366F100']} style={styles.orbFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} />
       </Animated.View>
@@ -278,82 +138,174 @@ export default function LoginScreen() {
       </Animated.View>
 
       <SafeAreaView style={styles.safe}>
-        <Animated.View style={[styles.content, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-          <View style={styles.taglineRow}>
-            <View style={styles.taglineLine} />
-            <Text style={styles.tagline}>Enterprise Resource Planning</Text>
-            <View style={styles.taglineLine} />
-          </View>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <Animated.View style={[styles.content, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
 
-          <View style={styles.hexContainer}>
-            {EDGES.map((e, i) => (
-              <Animated.View key={`edge-${i}`} style={[styles.hexEdge, { left: e.left, top: e.top, opacity: edgeOpacity, transform: [{ rotate: e.angle }] }]} />
-            ))}
-            {VERTICES.map((v, i) => {
-              const dx    = v.x - HEX_CX;
-              const dy    = v.y - HEX_CY;
-              const spoke = Math.sqrt(dx * dx + dy * dy) * 0.42;
-              const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
-              const midX  = HEX_CX + dx * 0.21;
-              const midY  = HEX_CY + dy * 0.21;
-              return (
-                <Animated.View key={`spoke-${i}`} style={[styles.spoke, { left: midX - spoke / 2, top: midY - 0.5, width: spoke, opacity: edgeOpacity, transform: [{ rotate: `${angle}deg` }] }]} />
-              );
-            })}
-            {FEATURES.map((f, i) => {
-              const v = VERTICES[i];
-              return (
-                <View key={f.label} style={[styles.chip, { left: v.x - CHIP_W / 2, top: v.y - CHIP_H / 2, borderColor: `${f.color}55`, backgroundColor: `${f.color}15` }]}>
-                  <Ionicons name={f.icon as any} size={11} color={f.color} />
-                  <Text style={[styles.chipLabel, { color: f.color }]}>{f.label}</Text>
+            {/* ── Tagline ── */}
+            <View style={styles.taglineRow}>
+              <View style={styles.taglineLine} />
+              <Text style={styles.tagline}>Enterprise Resource Planning</Text>
+              <View style={styles.taglineLine} />
+            </View>
+
+            {/* ── Hex diagram ── */}
+            <View style={styles.hexContainer}>
+              {EDGES.map((e, i) => (
+                <Animated.View
+                  key={`edge-${i}`}
+                  style={[styles.hexEdge, { left: e.left, top: e.top, opacity: edgeOpacity, transform: [{ rotate: e.angle }] }]}
+                />
+              ))}
+              {VERTICES.map((v, i) => {
+                const dx    = v.x - HEX_CX;
+                const dy    = v.y - HEX_CY;
+                const spoke = Math.sqrt(dx * dx + dy * dy) * 0.42;
+                const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+                const midX  = HEX_CX + dx * 0.21;
+                const midY  = HEX_CY + dy * 0.21;
+                return (
+                  <Animated.View
+                    key={`spoke-${i}`}
+                    style={[styles.spoke, { left: midX - spoke / 2, top: midY - 0.5, width: spoke, opacity: edgeOpacity, transform: [{ rotate: `${angle}deg` }] }]}
+                  />
+                );
+              })}
+              {FEATURES.map((f, i) => {
+                const v = VERTICES[i];
+                return (
+                  <View
+                    key={f.label}
+                    style={[styles.chip, { left: v.x - CHIP_W / 2, top: v.y - CHIP_H / 2, borderColor: `${f.color}55`, backgroundColor: `${f.color}15` }]}
+                  >
+                    <Ionicons name={f.icon as any} size={11} color={f.color} />
+                    <Text style={[styles.chipLabel, { color: f.color }]}>{f.label}</Text>
+                  </View>
+                );
+              })}
+              <Animated.View style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}>
+                <Animated.View style={[styles.glowRing, { opacity: edgeOpacity }]} />
+                <Image
+                  source={require('../../assets/images/bizcore_logo.png')}
+                  style={styles.logoImage}
+                  resizeMode="contain"
+                />
+              </Animated.View>
+            </View>
+
+            {/* ── Login form ── */}
+            <View style={styles.formSection}>
+
+              {/* Error banner */}
+              {error && (
+                <View style={styles.errorBox}>
+                  <Ionicons name="alert-circle" size={16} color={Colors.danger} />
+                  <Text style={styles.errorText}>{error}</Text>
                 </View>
-              );
-            })}
-            <Animated.View style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}>
-              <Animated.View style={[styles.glowRing, { opacity: edgeOpacity }]} />
-              <Image source={require('../../assets/images/bizcore_logo.png')} style={styles.logoImage} resizeMode="contain" />
-            </Animated.View>
-          </View>
+              )}
 
-          <View style={styles.signIn}>
-            {error && (
-              <View style={styles.errorBox}>
-                <Ionicons name="alert-circle" size={16} color={Colors.danger} />
-                <Text style={styles.errorText}>{error}</Text>
+              {/* Username field */}
+              <View style={styles.inputWrapper}>
+                <View style={styles.inputIconBox}>
+                  <Ionicons name="person-outline" size={18} color={Colors.textMuted} />
+                </View>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Username or email"
+                  placeholderTextColor={Colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                  returnKeyType="next"
+                  value={username}
+                  onChangeText={setUsername}
+                  editable={!isLoading}
+                />
               </View>
-            )}
-            <TouchableOpacity style={styles.googleBtn} onPress={handleGoogleLogin} disabled={isLoading} activeOpacity={0.85}>
-              <LinearGradient colors={isLoading ? ['#1C1C2E', '#1C1C2E'] : ['#1C1C2E', '#141426']} style={styles.googleBtnInner} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
-                {isLoading ? <ActivityIndicator color={Colors.primary} size="small" /> : (
-                  <>
-                    <View style={styles.googleIconBox}>
-                      <Ionicons name="logo-google" size={20} color="#EA4335" />
-                    </View>
-                    <Text style={styles.googleBtnText}>Continue with Google</Text>
-                    <Ionicons name="arrow-forward" size={16} color={Colors.textMuted} />
-                  </>
-                )}
-              </LinearGradient>
-            </TouchableOpacity>
-            <LinearGradient colors={['transparent', '#6366F155', 'transparent']} style={styles.accentLine} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} />
-            <Text style={styles.disclaimer}>Secure sign-in · Your data is encrypted and protected</Text>
-          </View>
-        </Animated.View>
+
+              {/* Password field */}
+              <View style={styles.inputWrapper}>
+                <View style={styles.inputIconBox}>
+                  <Ionicons name="lock-closed-outline" size={18} color={Colors.textMuted} />
+                </View>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Password"
+                  placeholderTextColor={Colors.textMuted}
+                  secureTextEntry={!showPassword}
+                  returnKeyType="done"
+                  onSubmitEditing={handleLogin}
+                  value={password}
+                  onChangeText={setPassword}
+                  editable={!isLoading}
+                />
+                <TouchableOpacity
+                  style={styles.eyeBtn}
+                  onPress={() => setShowPassword(v => !v)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons
+                    name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                    size={18}
+                    color={Colors.textMuted}
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {/* Sign-in button */}
+              <TouchableOpacity
+                style={styles.loginBtn}
+                onPress={handleLogin}
+                disabled={isLoading}
+                activeOpacity={0.85}
+              >
+                <LinearGradient
+                  colors={isLoading ? ['#1C1C2E', '#1C1C2E'] : ['#6366F1', '#4F46E5']}
+                  style={styles.loginBtnInner}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                >
+                  {isLoading ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <>
+                      <Text style={styles.loginBtnText}>Sign In</Text>
+                      <Ionicons name="arrow-forward" size={18} color="#fff" />
+                    </>
+                  )}
+                </LinearGradient>
+              </TouchableOpacity>
+
+              <LinearGradient
+                colors={['transparent', '#6366F155', 'transparent']}
+                style={styles.accentLine}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+              />
+              <Text style={styles.disclaimer}>
+                Secure sign-in · Your data is encrypted and protected
+              </Text>
+            </View>
+
+          </Animated.View>
+        </ScrollView>
       </SafeAreaView>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   root:           { flex: 1, backgroundColor: '#06060E' },
   safe:           { flex: 1 },
+  scroll:         { flexGrow: 1 },
   content:        { flex: 1, paddingHorizontal: 20, justifyContent: 'space-between', paddingVertical: 20 },
   orb1:           { position: 'absolute', top: -80, right: -80, width: 280, height: 280, borderRadius: 140, overflow: 'hidden' },
   orb2:           { position: 'absolute', bottom: 60, left: -100, width: 260, height: 260, borderRadius: 130, overflow: 'hidden' },
   orbFill:        { flex: 1 },
+
   taglineRow:     { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 8 },
   taglineLine:    { flex: 1, height: 1, backgroundColor: '#2A2A3E' },
   tagline:        { fontSize: 12, color: Colors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' },
+
   hexContainer:   { width: HEX_SIZE, height: HEX_SIZE, alignSelf: 'center', position: 'relative' },
   hexEdge:        { position: 'absolute', width: HEX_R, height: 1.5, backgroundColor: '#6366F1', borderRadius: 1 },
   spoke:          { position: 'absolute', height: 1, backgroundColor: '#6366F144', borderRadius: 1 },
@@ -362,13 +314,21 @@ const styles = StyleSheet.create({
   logoWrapper:    { position: 'absolute', left: HEX_CX - 58, top: HEX_CY - 58, width: 116, height: 116, alignItems: 'center', justifyContent: 'center' },
   glowRing:       { position: 'absolute', width: 116, height: 116, borderRadius: 58, borderWidth: 1, borderColor: '#6366F166', backgroundColor: '#6366F108' },
   logoImage:      { width: 90, height: 90 },
-  signIn:         { gap: 10 },
+
+  formSection:    { gap: 12, paddingBottom: 8 },
+
   errorBox:       { flexDirection: 'row', alignItems: 'center', backgroundColor: `${Colors.danger}15`, borderWidth: 1, borderColor: `${Colors.danger}40`, padding: 12, borderRadius: 12, gap: 8 },
   errorText:      { color: Colors.danger, fontSize: 13, flex: 1 },
-  googleBtn:      { borderRadius: 14, borderWidth: 1, borderColor: '#2A2A3E', overflow: 'hidden' },
-  googleBtnInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 16 },
-  googleIconBox:  { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFFFFF08', borderWidth: 1, borderColor: '#FFFFFF12', justifyContent: 'center', alignItems: 'center' },
-  googleBtnText:  { fontSize: 16, fontWeight: '600', color: '#FFFFFF', flex: 1, marginLeft: 12 },
-  accentLine:     { height: 1, marginHorizontal: 32 },
+
+  inputWrapper:   { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1C1C2E', borderRadius: 14, borderWidth: 1, borderColor: '#2A2A3E', overflow: 'hidden' },
+  inputIconBox:   { width: 46, alignItems: 'center', justifyContent: 'center' },
+  input:          { flex: 1, height: 52, color: '#FFFFFF', fontSize: 15, paddingRight: 12 },
+  eyeBtn:         { paddingHorizontal: 14 },
+
+  loginBtn:       { borderRadius: 14, overflow: 'hidden', marginTop: 4 },
+  loginBtnInner:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, gap: 10 },
+  loginBtnText:   { fontSize: 16, fontWeight: '700', color: '#FFFFFF', letterSpacing: 0.3 },
+
+  accentLine:     { height: 1, marginHorizontal: 32, marginTop: 4 },
   disclaimer:     { fontSize: 12, color: Colors.textMuted, textAlign: 'center', letterSpacing: 0.2, paddingBottom: 4 },
 });
