@@ -1,0 +1,13 @@
+# nixpacks.toml — Railway build configuration for BizcoreV2
+# Installs ffmpeg for any media handling.
+# Railway uses this when NOT using a Dockerfile builder.
+# Since railway.json specifies DOCKERFILE builder, this is a fallback reference.
+
+[phases.setup]
+nixPkgs = ["ffmpeg", "ffprobe"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "uvicorn server:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 300"
