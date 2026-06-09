@@ -1,0 +1,36 @@
+# BizCore Backend — Production Requirements (Railway + MongoDB Atlas)
+# Direct username/password auth — no third-party auth provider needed.
+
+fastapi==0.110.1
+uvicorn==0.25.0
+starlette==0.37.2
+
+# Database
+motor==3.3.1
+pymongo==4.5.0
+dnspython==2.8.0
+
+# Config & validation
+python-dotenv==1.2.1
+pydantic==2.12.5
+pydantic[email]==2.12.5
+email-validator==2.3.0
+
+# PDF generation (invoices + reports)
+reportlab==4.2.2
+
+# Utilities
+python-multipart==0.0.22
+
+# ============================================================
+# SECURITY PACKAGES
+# ============================================================
+
+# Rate limiting - prevents brute force and DoS attacks
+slowapi==0.1.9
+
+# Cryptography - for secure random session token generation
+cryptography==42.0.5
+
+# Password hashing uses Python's stdlib `hashlib` (PBKDF2-HMAC-SHA256,
+# 200k iterations) — no extra dependency required.
