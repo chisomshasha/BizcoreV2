@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { ErrorBoundary } from '../../src/components/ErrorBoundary';
 import {
   View,
   Text,
@@ -81,6 +82,8 @@ export default function InventoryScreen() {
 
   useEffect(() => {
     loadData();
+    // Load aggregated stock on mount so Products tab shows correct quantities immediately
+    loadInventoryByWarehouse();
   }, []);
 
   useEffect(() => {
@@ -103,10 +106,7 @@ export default function InventoryScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadData();
-    if (activeTab === 'stock') {
-      await loadInventoryByWarehouse();
-    }
+    await Promise.all([loadData(), loadInventoryByWarehouse()]);
     setRefreshing(false);
   };
 
@@ -259,9 +259,13 @@ export default function InventoryScreen() {
     );
   };
 
-  const getProductStock = (productId: string) => {
+  const getProductStock = (productId: string): number => {
+    // Prefer the aggregated by-warehouse data (already summed on the backend)
+    const byWh = inventoryByWarehouse.find((p: any) => p.product_id === productId);
+    if (byWh) return Number(byWh.total_quantity) || 0;
+    // Fallback to flat inventory records
     const stocks = inventory.filter((s) => s.product_id === productId);
-    return stocks.reduce((sum, s) => sum + s.quantity, 0);
+    return stocks.reduce((sum, s) => sum + (Number(s.quantity) || 0), 0);
   };
 
   const filteredProducts = products.filter((p) => {
@@ -286,10 +290,15 @@ export default function InventoryScreen() {
   };
 
   if (isLoading && products.length === 0) {
-    return <LoadingScreen />;
+    return (
+      <ErrorBoundary>
+        <LoadingScreen />
+      </ErrorBoundary>
+    );
   }
 
   return (
+    <ErrorBoundary>
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header */}
       <View style={styles.header}>
@@ -444,7 +453,7 @@ export default function InventoryScreen() {
                           { color: isLowStock ? Colors.danger : Colors.text },
                         ]}
                       >
-                        {stock} {product.unit}
+                        {stock.toLocaleString()}{product.unit && isNaN(Number(product.unit)) ? ` ${product.unit}` : ''}
                       </Text>
                     </View>
                   </View>
@@ -792,6 +801,7 @@ export default function InventoryScreen() {
         />
       )}
     </SafeAreaView>
+    </ErrorBoundary>
   );
 }
 
@@ -821,11 +831,11 @@ function StockByWarehouseView({
 
   // Grand totals
   const grandTotalValue = filtered.reduce(
-    (sum, p) => sum + (p.total_value || 0),
+    (sum, p) => sum + (Number(p.total_value) || 0),
     0
   );
   const grandTotalQty = filtered.reduce(
-    (sum, p) => sum + (p.total_quantity || 0),
+    (sum, p) => sum + (Number(p.total_quantity) || 0),
     0
   );
   const lowStockCount = filtered.filter((p) => p.is_low_stock).length;
