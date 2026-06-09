@@ -260,35 +260,124 @@ export default function AgentLedgerScreen() {
             </View>
           )}
 
-          {/* Transaction history */}
+          {/* Transaction history — detailed ledger table */}
           <View style={s.section}>
             <Text style={s.sectionTitle}>Transaction History</Text>
             {ledger.ledger_entries.length === 0 ? (
               <Text style={s.empty}>No transactions yet</Text>
-            ) : (
-              ledger.ledger_entries.map(entry => {
+            ) : (() => {
+              // Build entries in chronological order for running balance
+              const chronological = [...ledger.ledger_entries].reverse();
+              let runningBalance = 0;
+              const withBalance = chronological.map(entry => {
+                runningBalance += entry.amount;
+                return { ...entry, runningBalance };
+              });
+              // Display newest first
+              const displayEntries = [...withBalance].reverse();
+
+              return displayEntries.map(entry => {
                 const isPayment = entry.entry_type === 'payment';
+                const isReturn = entry.entry_type === 'return';
+                const isDispatch = entry.entry_type === 'dispatch';
+
+                // Aggregate items for dispatch/return entries
+                const items: any[] = entry.items || [];
+                const totalQtySupplied = isDispatch
+                  ? items.reduce((s: number, i: any) => s + (Number(i.quantity) || 0), 0)
+                  : 0;
+                const totalQtyReturned = isReturn
+                  ? items.reduce((s: number, i: any) => s + (Number(i.quantity) || 0), 0)
+                  : 0;
+                // Weighted-average unit price across items
+                const avgUnitPrice = items.length > 0
+                  ? items.reduce((s: number, i: any) => s + (Number(i.unit_price) || 0), 0) / items.length
+                  : 0;
+
+                const totalAmount = Math.abs(entry.amount);
+                const amountPaid = isPayment ? totalAmount : 0;
+                const balance = entry.runningBalance;
+
+                const dotColor = isPayment ? '#10B981' : isReturn ? '#F59E0B' : '#3B82F6';
+                const typeLabel = isPayment ? 'Payment Received'
+                  : isReturn ? 'Goods Returned'
+                  : 'Goods Released';
+
                 return (
-                  <View key={entry.entry_id} style={s.entryRow}>
-                    <View style={[s.entryDot, { backgroundColor: isPayment ? '#10B981' : '#3B82F6' }]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.entryType}>
-                        {isPayment ? 'Payment Received' : 'Goods Released'}
-                      </Text>
-                      {entry.notes ? <Text style={s.entryNotes}>{entry.notes}</Text> : null}
-                      <Text style={s.entryDate}>
+                  <View key={entry.entry_id} style={s.ledgerCard}>
+                    {/* Row 1 — date + type badge */}
+                    <View style={s.ledgerHeader}>
+                      <View style={[s.typeBadge, { backgroundColor: dotColor + '22', borderColor: dotColor }]}>
+                        <Text style={[s.typeBadgeText, { color: dotColor }]}>{typeLabel}</Text>
+                      </View>
+                      <Text style={s.ledgerDate}>
                         {new Date(entry.created_at).toLocaleDateString('en-NG', {
                           day: 'numeric', month: 'short', year: 'numeric'
                         })}
                       </Text>
                     </View>
-                    <Text style={[s.entryAmount, { color: isPayment ? '#10B981' : '#F9FAFB' }]}>
-                      {isPayment ? '−' : '+'}₦{fmt(Math.abs(entry.amount))}
-                    </Text>
+
+                    {/* Details (notes / reference) */}
+                    {entry.notes ? (
+                      <Text style={s.ledgerDetails} numberOfLines={2}>{entry.notes}</Text>
+                    ) : null}
+
+                    {/* Item breakdown for dispatch/return */}
+                    {items.length > 0 && (
+                      <View style={s.itemsBlock}>
+                        {items.map((item: any, idx: number) => (
+                          <View key={idx} style={s.itemLine}>
+                            <Text style={s.itemName} numberOfLines={1}>{item.product_name || item.product_id}</Text>
+                            <Text style={s.itemQty}>{Number(item.quantity).toLocaleString()} {isReturn ? '(ret)' : ''}</Text>
+                            <Text style={s.itemPrice}>@ ₦{fmt(Number(item.unit_price) || 0)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Metrics grid */}
+                    <View style={s.metricsGrid}>
+                      {totalQtySupplied > 0 && (
+                        <View style={s.metricCell}>
+                          <Text style={s.metricLabel}>Qty Supplied</Text>
+                          <Text style={s.metricValue}>{totalQtySupplied.toLocaleString()}</Text>
+                        </View>
+                      )}
+                      {totalQtyReturned > 0 && (
+                        <View style={s.metricCell}>
+                          <Text style={s.metricLabel}>Qty Returned</Text>
+                          <Text style={[s.metricValue, { color: '#F59E0B' }]}>{totalQtyReturned.toLocaleString()}</Text>
+                        </View>
+                      )}
+                      {avgUnitPrice > 0 && (
+                        <View style={s.metricCell}>
+                          <Text style={s.metricLabel}>Unit Price</Text>
+                          <Text style={s.metricValue}>₦{fmt(avgUnitPrice)}</Text>
+                        </View>
+                      )}
+                      <View style={s.metricCell}>
+                        <Text style={s.metricLabel}>Total Amount</Text>
+                        <Text style={[s.metricValue, { color: isPayment ? '#10B981' : '#F9FAFB' }]}>
+                          ₦{fmt(totalAmount)}
+                        </Text>
+                      </View>
+                      <View style={s.metricCell}>
+                        <Text style={s.metricLabel}>Amount Paid</Text>
+                        <Text style={[s.metricValue, { color: amountPaid > 0 ? '#10B981' : '#6B7280' }]}>
+                          ₦{fmt(amountPaid)}
+                        </Text>
+                      </View>
+                      <View style={s.metricCell}>
+                        <Text style={s.metricLabel}>Balance</Text>
+                        <Text style={[s.metricValue, { color: balance <= 0 ? '#10B981' : balance > creditLimit * 0.8 ? '#EF4444' : '#F59E0B' }]}>
+                          ₦{fmt(balance)}
+                        </Text>
+                      </View>
+                    </View>
                   </View>
                 );
-              })
-            )}
+              });
+            })()}
           </View>
         </>
       )}
@@ -441,6 +530,27 @@ const s = StyleSheet.create({
   entryAmount: { fontWeight: 'bold', fontSize: 15, minWidth: 80, textAlign: 'right',
     marginLeft: 'auto' as any },
   empty: { color: '#6B7280', textAlign: 'center', padding: 24 },
+
+  // Detailed ledger card styles
+  ledgerCard: { borderWidth: 1, borderColor: '#374151', borderRadius: 10,
+    marginBottom: 10, padding: 12, backgroundColor: '#111827' },
+  ledgerHeader: { flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', marginBottom: 6 },
+  typeBadge: { paddingHorizontal: 9, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
+  typeBadgeText: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  ledgerDate: { color: '#9CA3AF', fontSize: 12 },
+  ledgerDetails: { color: '#9CA3AF', fontSize: 12, marginBottom: 8, lineHeight: 17 },
+  itemsBlock: { backgroundColor: '#1F2937', borderRadius: 6, padding: 8, marginBottom: 8 },
+  itemLine: { flexDirection: 'row', alignItems: 'center', paddingVertical: 3, gap: 4 },
+  itemName: { color: '#D1D5DB', fontSize: 12, flex: 1 },
+  itemQty: { color: '#9CA3AF', fontSize: 12, minWidth: 52, textAlign: 'right' },
+  itemPrice: { color: '#6B7280', fontSize: 11, minWidth: 80, textAlign: 'right' },
+  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  metricCell: { minWidth: '30%', flex: 1, backgroundColor: '#1F2937',
+    borderRadius: 7, padding: 8 },
+  metricLabel: { color: '#6B7280', fontSize: 10, fontWeight: '600',
+    textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 },
+  metricValue: { color: '#F9FAFB', fontWeight: '700', fontSize: 13 },
 
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'flex-end' },
   modal: { backgroundColor: '#1F2937', borderTopLeftRadius: 20, borderTopRightRadius: 20,
