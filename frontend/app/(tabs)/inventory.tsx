@@ -71,6 +71,8 @@ export default function InventoryScreen() {
     selling_price: '',
     reorder_level: '10',
     barcode: '',
+    initial_warehouse_id: '',
+    initial_quantity: '',
   });
 
   const [adjustData, setAdjustData] = useState({
@@ -129,16 +131,46 @@ export default function InventoryScreen() {
         return;
       }
 
-      await createProduct({
+      const newProduct = await createProduct({
         ...formData,
         cost_price: parseFloat(formData.cost_price) || 0,
         selling_price: parseFloat(formData.selling_price) || 0,
         reorder_level: parseInt(formData.reorder_level) || 10,
       });
 
+      // Seed initial stock if warehouse + quantity were provided
+      const initQty = parseFloat(formData.initial_quantity);
+      if (formData.initial_warehouse_id && initQty > 0) {
+        try {
+          await adjustInventory({
+            product_id: newProduct.product_id,
+            warehouse_id: formData.initial_warehouse_id,
+            type: 'adjustment',
+            quantity: initQty,
+            notes: 'Initial stock on product creation',
+          });
+        } catch (stockErr: any) {
+          // Product was created; warn but don't block
+          Alert.alert(
+            'Product Created',
+            `Product was created but the initial stock could not be set: ${stockErr?.response?.data?.detail || 'Unknown error'}. You can add stock using the Adjust Stock option.`
+          );
+          setShowAddModal(false);
+          resetForm();
+          await loadInventoryByWarehouse();
+          return;
+        }
+      }
+
       setShowAddModal(false);
       resetForm();
-      Alert.alert('Success', 'Product created successfully');
+      await loadInventoryByWarehouse();
+      Alert.alert(
+        'Success',
+        initQty > 0 && formData.initial_warehouse_id
+          ? `Product created and ${initQty.toLocaleString()} units added to stock.`
+          : 'Product created successfully.'
+      );
     } catch (error: any) {
       Alert.alert('Error', error.response?.data?.detail || 'Failed to create product');
     }
@@ -224,6 +256,8 @@ export default function InventoryScreen() {
       selling_price: '',
       reorder_level: '10',
       barcode: '',
+      initial_warehouse_id: '',
+      initial_quantity: '',
     });
     setSelectedProduct(null);
   };
@@ -578,6 +612,56 @@ export default function InventoryScreen() {
                 onChangeText={(text) => setFormData({ ...formData, barcode: text })}
                 placeholder="Enter barcode"
               />
+
+              {/* ── Initial Stock (optional) ── */}
+              <Text style={[styles.inputLabel, { marginTop: 16, color: Colors.primary }]}>
+                Initial Stock (Optional)
+              </Text>
+              <Text style={[styles.inputLabel, { fontSize: 11, marginTop: -4, marginBottom: 8, color: Colors.textMuted }]}>
+                Select a warehouse and enter the opening quantity to seed stock immediately.
+              </Text>
+              <Text style={styles.inputLabel}>Warehouse</Text>
+              <View style={styles.warehousePicker}>
+                {warehouses.map((wh) => (
+                  <TouchableOpacity
+                    key={wh.warehouse_id}
+                    style={[
+                      styles.warehouseOption,
+                      formData.initial_warehouse_id === wh.warehouse_id && styles.warehouseOptionActive,
+                    ]}
+                    onPress={() =>
+                      setFormData({ ...formData, initial_warehouse_id: wh.warehouse_id })
+                    }
+                  >
+                    <Ionicons
+                      name="home-outline"
+                      size={18}
+                      color={
+                        formData.initial_warehouse_id === wh.warehouse_id
+                          ? Colors.primary
+                          : Colors.textMuted
+                      }
+                    />
+                    <Text
+                      style={[
+                        styles.warehouseOptionText,
+                        formData.initial_warehouse_id === wh.warehouse_id &&
+                          styles.warehouseOptionTextActive,
+                      ]}
+                    >
+                      {wh.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Input
+                label="Opening Quantity"
+                value={formData.initial_quantity}
+                onChangeText={(text) => setFormData({ ...formData, initial_quantity: text })}
+                placeholder="0"
+                keyboardType="numeric"
+              />
+
               <Button title="Create Product" onPress={handleAddProduct} style={{ marginTop: 16 }} />
             </ScrollView>
           </View>
