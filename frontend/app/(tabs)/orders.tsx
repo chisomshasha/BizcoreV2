@@ -117,12 +117,21 @@ export default function OrdersScreen() {
 
   const handleCreateOrder = async () => {
     try {
-      const validItems = orderForm.items.filter(
-        (item) => item.product_id && item.quantity && item.unit_price
-      );
+      // FIXED: Better validation - parse numbers and require positive values
+      const validItems = orderForm.items
+        .map((item) => ({
+          product_id: item.product_id,
+          quantity: parseFloat(item.quantity || '0'),
+          unit_price: parseFloat(item.unit_price || '0'),
+        }))
+        .filter((item) => 
+          item.product_id && 
+          !isNaN(item.quantity) && item.quantity > 0 && 
+          !isNaN(item.unit_price) && item.unit_price > 0
+        );
 
       if (validItems.length === 0) {
-        Alert.alert('Error', 'Please add at least one item');
+        Alert.alert('Error', 'Please add at least one item with valid quantity and price');
         return;
       }
 
@@ -142,13 +151,11 @@ export default function OrdersScreen() {
           notes: orderForm.notes,
           items: validItems.map((item) => ({
             product_id: item.product_id,
-            quantity: parseFloat(item.quantity),
-            unit_price: parseFloat(item.unit_price),
+            quantity: item.quantity,
+            unit_price: item.unit_price,
           })),
         });
       } else {
-        // Sales Orders are created automatically when a manager approves an agent
-        // quotation. Direct creation here is for manager/admin override only.
         if (!orderForm.sales_rep_id) {
           Alert.alert('Error', 'Please select a Sales Representative');
           return;
@@ -159,8 +166,8 @@ export default function OrdersScreen() {
           notes: orderForm.notes,
           items: validItems.map((item) => ({
             product_id: item.product_id,
-            quantity: parseFloat(item.quantity),
-            unit_price: parseFloat(item.unit_price),
+            quantity: item.quantity,
+            unit_price: item.unit_price,
           })),
         });
       }
@@ -222,7 +229,6 @@ export default function OrdersScreen() {
         default:         return [];
       }
     } else {
-      // Sales order workflow: pending_approval → approved → goods_released → delivered → paid
       switch (currentStatus) {
         case 'pending_approval': return ['approved', 'cancelled'];
         case 'approved':         return ['goods_released', 'cancelled'];
@@ -375,7 +381,7 @@ export default function OrdersScreen() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* Add Order Modal */}
+      {/* Add Order Modal - (unchanged except validation fix above) */}
       <Modal visible={showAddModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
@@ -454,7 +460,7 @@ export default function OrdersScreen() {
                 ))}
               </View>
 
-              {/* Items */}
+              {/* Items Section */}
               <View style={styles.itemsHeader}>
                 <Text style={styles.inputLabel}>Items</Text>
                 <TouchableOpacity style={styles.addItemButton} onPress={addItemToOrder}>
@@ -638,7 +644,6 @@ export default function OrdersScreen() {
                   </View>
                 </View>
 
-                {/* Status Actions */}
                 {getNextStatus(selectedOrder.status).length > 0 && (
                   <>
                     <Text style={styles.sectionTitle}>Update Status</Text>
@@ -912,8 +917,8 @@ const styles = StyleSheet.create({
   },
   productChipTextActive: {
     color: Colors.text,
-    fontWeight: '700',     // bold the selected product name
-    fontSize: 13,          // slightly larger to make the highlight pop
+    fontWeight: '700',
+    fontSize: 13,
   },
   itemInputRow: {
     flexDirection: 'row',
