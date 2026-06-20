@@ -115,53 +115,62 @@ DEFAULT_PERMISSIONS: Dict[str, Dict[str, CRUDPermission]] = {
         "bom":                 _FULL,
         "warehouse_transfers": _FULL,
         "three_way_match":     _FULL,
-        "audit_logs":          _R,
+        "audit_logs":          _NONE,  # SuperAdmin/GM only — system-wide, not warehouse-scopable
         "agent_ledger":        _R,
     },
 
-    # ── Accountant — full read + finance write ────────────────────────────────
+    # ── Accountant — top echelon for READ, finance-only for WRITE ──────────────
+    # There is exactly one Accountant overseeing the entire business, so
+    # they read everything cross-warehouse like SuperAdmin/GM (audit logs,
+    # all warehouses' data, etc.) — but can only write in financially
+    # non-critical spheres (invoices, expenses, payments). They cannot
+    # approve quotations, adjust inventory, create/edit orders, manage
+    # users, or write to any other operationally/admin-critical module.
     "accountant": {
         "products":            _R,
         "inventory":           _R,
         "suppliers":           _R,
         "purchase_orders":     _R,
-        "sales_orders":        _R,
-        "invoices":            _FULL,
-        "expenses":            _FULL,
+        "sales_orders":        _R,     # view only — cannot approve/create/edit
+        "invoices":            _FULL,  # financial record-keeping is their job
+        "expenses":            _FULL,  # financial record-keeping is their job
         "requisitions":        _R,
-        "quotations":          _R,
+        "quotations":          _R,     # view only — cannot approve (see QUOTATION_APPROVAL_ROLES)
         "grn":                 _R,
         "warehouses":          _R,
-        "users":               _CRU,
+        "users":               _R,     # user management is admin-critical, not finance-critical
         "reports":             _R,
         "delivery_notes":      _R,
         "bom":                 _R,
-        "warehouse_transfers": _R,
+        "warehouse_transfers": _R,     # view only — initiate/confirm gated separately, finance oversight
         "three_way_match":     _R,
-        "audit_logs":          _R,
-        "agent_ledger":        _R,
+        "audit_logs":          _R,     # top echelon: read-only oversight of the whole system
+        "agent_ledger":        _R,     # view only — payment recording handled via dedicated endpoint
     },
 
-    # ── Purchase Clerk ────────────────────────────────────────────────────────
+    # ── Purchase Clerk — procurement / cost-of-doing-business side ─────────────
+    # Buys raw materials, packaging, and finished goods before they're
+    # stocked into inventory. Owns the PO → GRN → 3-way-match chain.
+    # Has no business creating or managing sales-side records.
     "purchase_clerk": {
         "products":            _R,
-        "inventory":           _RU,
+        "inventory":           _RU,    # update used for stock-count corrections during receiving reconciliation; the manual /inventory/adjust ("stocking/restocking") endpoint is separately hard-locked to SuperAdmin/GM regardless of this flag — GRN receiving (their actual stock-in path) mutates stock directly and only needs grn:create
         "suppliers":           _FULL,
-        "purchase_orders":     _CR,
-        "sales_orders":        _R,
-        "invoices":            _CR,
+        "purchase_orders":     _CRU,   # manage own POs through their lifecycle
+        "sales_orders":        _R,     # visibility only — not their workflow
+        "invoices":            _CR,    # purchase invoices
         "expenses":            _R,
         "requisitions":        _CR,
-        "quotations":          _R,
+        "quotations":          _NONE,  # sales-side workflow, not procurement
         "grn":                 _FULL,
         "warehouses":          _R,
         "users":               _NONE,
         "reports":             _R,
-        "delivery_notes":      _R,
+        "delivery_notes":      _R,     # visibility only — not their workflow
         "bom":                 _R,
         "warehouse_transfers": _R,
-        "three_way_match":     _R,
-        "audit_logs":          _R,
+        "three_way_match":     _FULL,
+        "audit_logs":          _NONE,  # SuperAdmin/GM only — system-wide, not warehouse-scopable
         "agent_ledger":        _NONE,
     },
 
@@ -188,34 +197,38 @@ DEFAULT_PERMISSIONS: Dict[str, Dict[str, CRUDPermission]] = {
         "agent_ledger":        _R,     # read own ledger (accounts receivable dashboard)
     },
 
-    # ── Sales Clerk (internal dispatch staff) ─────────────────────────────────
+    # ── Sales Clerk — fulfilment / revenue side ─────────────────────────────────
+    # Processes sales orders, releases goods to agents, and tracks delivery.
+    # Generates the sales/profit value of the business. Has no business
+    # creating or managing purchase-side procurement records.
     "sales_clerk": {
         "products":            _R,
-        "inventory":           _R,
+        "inventory":           _R,     # stock visibility for fulfilment, not adjustment
         "suppliers":           _R,
-        "purchase_orders":     _R,
-        "sales_orders":        _CR,
+        "purchase_orders":     _R,     # visibility only — not their workflow
+        "sales_orders":        _CRU,   # process, release goods, confirm delivery
         "invoices":            _R,
         "expenses":            _R,
-        "requisitions":        _R,
-        "quotations":          _R,
-        "grn":                 _R,
+        "requisitions":        _NONE,  # procurement workflow, not fulfilment
+        "quotations":          _R,     # visibility into what's coming for dispatch
+        "grn":                 _NONE,  # procurement workflow, not fulfilment
         "warehouses":          _R,
         "users":               _NONE,
         "reports":             _R,
-        "delivery_notes":      _R,
+        "delivery_notes":      _CRU,   # owns delivery tracking
         "bom":                 _R,
         "warehouse_transfers": _R,
-        "three_way_match":     _R,
-        "audit_logs":          _R,
+        "three_way_match":     _NONE,  # procurement workflow, not fulfilment
+        "audit_logs":          _NONE,  # SuperAdmin/GM only — system-wide, not warehouse-scopable
         "agent_ledger":        _NONE,
     },
 
     # ── Viewer ────────────────────────────────────────────────────────────────
-    "viewer": {m: _R for m in MODULES if m not in ("users", "agent_ledger")},
+    "viewer": {m: _R for m in MODULES if m not in ("users", "agent_ledger", "audit_logs")},
 }
 DEFAULT_PERMISSIONS["viewer"]["users"]        = _NONE
 DEFAULT_PERMISSIONS["viewer"]["agent_ledger"] = _NONE
+DEFAULT_PERMISSIONS["viewer"]["audit_logs"]   = _NONE  # top-echelon only
 
 
 # ── Runtime helpers ────────────────────────────────────────────────────────────

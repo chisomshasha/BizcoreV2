@@ -999,12 +999,35 @@ async def get_optional_user(request: Request) -> Optional[User]:
 # ─────────────────────────────────────────
 
 def is_cross_warehouse_role(role: UserRole) -> bool:
-    """SuperAdmin and General Manager can see all warehouses"""
+    """SuperAdmin and General Manager can both READ and WRITE across all
+    warehouses, bypassing any single-warehouse restriction. Used for
+    write-side checks (assert_same_warehouse) as well as reads — do not
+    add Accountant here, since Accountant must not bypass warehouse
+    restrictions on writes (e.g. recording a payment, approving an
+    expense). For Accountant's read-only cross-warehouse visibility, use
+    is_top_echelon_read() / get_read_warehouse_filter() instead.
+    """
     return role in (UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER)
+
+def is_top_echelon_read(role: UserRole) -> bool:
+    """SuperAdmin, General Manager, and Accountant all read across every
+    warehouse — there is exactly one Accountant overseeing the whole
+    business. This is READ-ONLY scope; it must never be used to bypass a
+    write-side warehouse restriction (use is_cross_warehouse_role there).
+    """
+    return role in (UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT)
 
 def get_user_warehouse_filter(user: User) -> Optional[str]:
     """Returns warehouse_id filter for DB queries, or None for cross-warehouse roles"""
     if is_cross_warehouse_role(user.role):
+        return None
+    return user.warehouse_id
+
+def get_read_warehouse_filter(user: User) -> Optional[str]:
+    """Like get_user_warehouse_filter, but also exempts the Accountant —
+    use this for READ endpoints (lists, reports, dashboards). Never use
+    this to gate a write/mutation action."""
+    if is_top_echelon_read(user.role):
         return None
     return user.warehouse_id
 
@@ -1016,10 +1039,16 @@ def assert_same_warehouse(user: User, warehouse_id: str, action: str = "access")
         raise HTTPException(status_code=403,
                             detail=f"Not authorized to {action} data in warehouse {warehouse_id}")
 
+# Roles allowed to approve/reject Sales Rep quotations specifically.
+# Narrower than APPROVAL_ROLES (which also includes Accountant for
+# debt-ceiling and warehouse-transfer purposes) — quotation approval is
+# restricted to SuperAdmin, General Manager, and Warehouse Manager only.
+QUOTATION_APPROVAL_ROLES = {UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.WAREHOUSE_MANAGER}
+
 def assert_approval_role(user: User):
     """Raises 403 if user cannot approve quotations"""
-    if user.role not in APPROVAL_ROLES:
-        raise HTTPException(status_code=403, detail="Only Managers and Accountants can approve quotations")
+    if user.role not in QUOTATION_APPROVAL_ROLES:
+        raise HTTPException(status_code=403, detail="Only SuperAdmin, General Manager, and Warehouse Manager can approve quotations")
 
 async def send_notification(user_ids: List[str], title: str, message: str, notif_type: str = "info"):
     """Create in-app notifications for a list of users"""
@@ -1701,9 +1730,24 @@ async def get_users(request: Request, user: User = Depends(get_current_user)):
 @api_router.post("/users/create")
 @limiter.limit("20/minute")
 async def create_user(request: Request, user_data: UserCreate, current_user: User = Depends(get_current_user)):
-    """SuperAdmin / General Manager / Accountant creates a user — Name, Email, Phone required. Rate limited: 20/minute."""
-    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
-        raise HTTPException(status_code=403, detail="Only Super Admin, General Manager, or Accountant can create users")
+    """SuperAdmin / General Manager / Warehouse Manager creates a user — Name, Email, Phone required. Rate limited: 20/minute.
+
+    User management is an admin-critical sphere, not a finance-critical
+    one — the Accountant has read-only visibility into the team (per
+    permissions.py: users:_R) but cannot create, edit, or delete accounts.
+    """
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.WAREHOUSE_MANAGER]:
+        raise HTTPException(status_code=403, detail="Only Super Admin, General Manager, or Warehouse Manager can create users")
+
+    # SECURITY: Prevent privilege escalation — cannot create a user with a
+    # role equal to or higher than your own (same rule as update_user).
+    caller_rank = _ROLE_RANK.get(current_user.role.value, 0)
+    target_rank = _ROLE_RANK.get(user_data.role.value, 0)
+    if target_rank >= caller_rank and current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot create a user with a role equal to or higher than your own"
+        )
 
     sanitized_email = sanitize_string(user_data.email.lower())
     sanitized_name = sanitize_string(user_data.name)
@@ -1791,14 +1835,27 @@ async def update_user(request: Request, user_id: str, update: UserUpdate, user: 
     """Update user. Rate limited: 100/minute."""
     await assert_permission(db, user.role, "users", "update")
     if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
-                          UserRole.WAREHOUSE_MANAGER, UserRole.ACCOUNTANT]:
+                          UserRole.WAREHOUSE_MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    target_user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # SECURITY: Prevent privilege escalation — cannot edit ANY field of a
+    # user who currently outranks you (not just role changes), and cannot
+    # assign a role equal to or higher than your own.
+    caller_rank = _ROLE_RANK.get(user.role.value, 0)
+    current_target_rank = _ROLE_RANK.get(target_user.get("role", ""), 0)
+    if current_target_rank >= caller_rank and user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot edit a user with a role equal to or higher than your own"
+        )
 
     update_data = {k: v for k, v in update.model_dump().items() if v is not None}
 
-    # SECURITY: Prevent privilege escalation — cannot assign a role >= own rank
     if "role" in update_data:
-        caller_rank = _ROLE_RANK.get(user.role.value, 0)
         target_rank = _ROLE_RANK.get(update_data["role"].value if hasattr(update_data["role"], "value") else update_data["role"], 0)
         if target_rank >= caller_rank and user.role != UserRole.SUPER_ADMIN:
             raise HTTPException(
@@ -1828,9 +1885,10 @@ async def update_user(request: Request, user_id: str, update: UserUpdate, user: 
 async def delete_user(request: Request, user_id: str, user: User = Depends(get_current_user)):
     """Delete (or deactivate) a user. Rate limited: 30/minute.
 
-    Authorization: Super Admin or General Manager (enforced by
-    `assert_permission(users, delete)` AND an explicit role check). Accountants
-    can create+update users but cannot delete them.
+    Authorization: Super Admin or General Manager only (enforced by
+    `assert_permission(users, delete)` AND an explicit role check).
+    Warehouse Manager can create/update users but not delete them.
+    Accountant has read-only visibility into users — no write access at all.
 
     - Cannot delete self.
     - Cannot delete the last active Super Admin.
@@ -1848,6 +1906,16 @@ async def delete_user(request: Request, user_id: str, user: User = Depends(get_c
     target = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # SECURITY: Prevent a General Manager from deleting a Super Admin
+    # (consistent with the same rank rule enforced on create/update).
+    caller_rank = _ROLE_RANK.get(user.role.value, 0)
+    target_rank = _ROLE_RANK.get(target.get("role", ""), 0)
+    if target_rank >= caller_rank and user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot delete a user with a role equal to or higher than your own"
+        )
 
     # Cannot delete the last active Super Admin
     if target.get("role") == UserRole.SUPER_ADMIN.value and target.get("is_active", True):
@@ -1938,7 +2006,7 @@ async def set_agent_debt_ceiling(request: Request, user_id: str, debt_ceiling: f
 @limiter.limit("100/minute")
 async def get_warehouse_agents(request: Request, user: User = Depends(get_current_user)):
     """Get Sales Reps for current user's warehouse with outstanding balance & flag. Rate limited: 100/minute."""
-    wh_filter = get_user_warehouse_filter(user)
+    wh_filter = get_read_warehouse_filter(user)
     query: Dict[str, Any] = {"role": {"$in": [UserRole.SALES_REP.value,
                                                UserRole.SALES_REP.value]}}
     if wh_filter:
@@ -2118,11 +2186,23 @@ async def get_inventory(
     product_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get inventory stock levels"""
+    """Get inventory stock levels.
+
+    SuperAdmin, General Manager, and Accountant (top echelon for reads) may
+    view across warehouses. Every other role is confined to their own
+    assigned warehouse — any warehouse_id they pass is ignored in favour of
+    their own, so this can't be used to peek into another warehouse's stock.
+    """
     await assert_permission(db, user.role, "inventory", "read")
-    query = {}
-    if warehouse_id:
+    query: Dict[str, Any] = {}
+
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        query["warehouse_id"] = wh_filter
+    elif warehouse_id:
+        # Only top-echelon roles may filter by an arbitrary warehouse_id
         query["warehouse_id"] = warehouse_id
+
     if product_id:
         query["product_id"] = product_id
     
@@ -2150,8 +2230,9 @@ async def get_inventory_by_warehouse(
 ):
     """Get inventory grouped by warehouse for each product.
 
-    Super Admin, General Manager, and Accountant see every warehouse; other
-    roles are scoped to their own warehouse (if set).
+    Only SuperAdmin and General Manager see every warehouse. Every other
+    role (including Accountant) is confined to their own assigned
+    warehouse — no role below the top echelon gets a cross-warehouse view.
 
     Returns:
     [
@@ -2175,13 +2256,10 @@ async def get_inventory_by_warehouse(
     await assert_permission(db, user.role, "inventory", "read")
 
     # Determine the visible warehouse scope for the current user.
-    # Per client spec: Super Admin, General Manager, and Accountant see all
-    # warehouses; Warehouse Managers see only their own; everyone else
-    # falls back to their own warehouse if set.
-    INVENTORY_FULL_VISIBILITY = {
-        UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT
-    }
-    is_admin_like = user.role in INVENTORY_FULL_VISIBILITY
+    # SuperAdmin, General Manager, and Accountant (top echelon for reads)
+    # see all warehouses; everyone else — Warehouse Manager, Sales Clerk,
+    # Purchase Clerk, Viewer — is confined to their own assigned warehouse.
+    is_admin_like = is_top_echelon_read(user.role)
     visible_warehouse_ids: Optional[set] = None
     if not is_admin_like and user.warehouse_id:
         visible_warehouse_ids = {user.warehouse_id}
@@ -2299,11 +2377,22 @@ async def get_stock_transactions(
     limit: int = 100,
     user: User = Depends(get_current_user)
 ):
-    """Get stock transaction history"""
-    query = {}
+    """Get stock transaction history.
+
+    SuperAdmin, General Manager, and Accountant (top echelon for reads) may
+    view across warehouses. Every other role is confined to their own
+    assigned warehouse — any warehouse_id they pass is ignored in favour of
+    their own.
+    """
+    await assert_permission(db, user.role, "inventory", "read")
+    query: Dict[str, Any] = {}
     if product_id:
         query["product_id"] = product_id
-    if warehouse_id:
+
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        query["warehouse_id"] = wh_filter
+    elif warehouse_id:
         query["warehouse_id"] = warehouse_id
     
     transactions = await db.stock_transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
@@ -2391,13 +2480,22 @@ async def get_purchase_orders(
     supplier_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get all purchase orders"""
+    """Get purchase orders.
+
+    SuperAdmin, General Manager, and Accountant (top echelon for reads) see
+    across all warehouses; every other role (Purchase Clerk, Warehouse
+    Manager, Sales Clerk, Viewer) is confined to their own assigned
+    warehouse's purchase orders.
+    """
     await assert_permission(db, user.role, "purchase_orders", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if status:
         query["status"] = status.value
     if supplier_id:
         query["supplier_id"] = supplier_id
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        query["warehouse_id"] = wh_filter
     
     orders = await db.purchase_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return orders
@@ -2530,16 +2628,29 @@ async def get_sales_orders(
     sales_rep_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get sales orders. Sales reps see only their own; managers see all."""
+    """Get sales orders.
+
+    Scope:
+    - Sales Rep: own orders only (no warehouse override possible)
+    - SuperAdmin/General Manager/Accountant: all warehouses (read-only for
+      Accountant), optionally filtered by sales_rep_id
+    - Everyone else (Warehouse Manager, Sales Clerk, Purchase Clerk,
+      Viewer): confined to their own assigned warehouse
+    """
     await assert_permission(db, user.role, "sales_orders", "read")
     query: Dict[str, Any] = {}
     if status:
         query["status"] = status.value
-    # Scope: agents only see their own orders
+
     if user.role == UserRole.SALES_REP.value:
+        # Agents only ever see their own orders, never warehouse-wide
         query["sales_rep_id"] = user.user_id
-    elif sales_rep_id:
-        query["sales_rep_id"] = sales_rep_id
+    else:
+        if sales_rep_id:
+            query["sales_rep_id"] = sales_rep_id
+        wh_filter = get_read_warehouse_filter(user)
+        if wh_filter is not None:
+            query["warehouse_id"] = wh_filter
 
     orders = await db.sales_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return orders
@@ -2667,13 +2778,27 @@ async def get_invoices(
     status: Optional[InvoiceStatus] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get all invoices"""
+    """Get invoices.
+
+    Invoices don't carry a warehouse_id directly — they reference a PO
+    (purchase invoice) or SO (sales invoice) via reference_id. SuperAdmin,
+    General Manager, and Accountant see every invoice company-wide
+    (invoices are core to the Accountant's job); every other role is
+    confined to invoices whose underlying PO/SO belongs to their warehouse.
+    """
     await assert_permission(db, user.role, "invoices", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if type:
         query["type"] = type.value
     if status:
         query["status"] = status.value
+
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        wh_pos = await db.purchase_orders.find({"warehouse_id": wh_filter}, {"_id": 0, "po_id": 1}).to_list(10000)
+        wh_sos = await db.sales_orders.find({"warehouse_id": wh_filter}, {"_id": 0, "so_id": 1}).to_list(10000)
+        allowed_reference_ids = [p["po_id"] for p in wh_pos] + [s["so_id"] for s in wh_sos]
+        query["reference_id"] = {"$in": allowed_reference_ids}
     
     invoices = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return invoices
@@ -2722,11 +2847,28 @@ async def create_invoice(invoice_data: InvoiceCreate, user: User = Depends(get_c
 
 @api_router.get("/payments")
 async def get_payments(invoice_id: Optional[str] = None, user: User = Depends(get_current_user)):
-    """Get all payments"""
+    """Get payments.
+
+    If a specific invoice_id is given, permission on that invoice's module
+    is sufficient (the caller already knows which invoice they're after).
+    For the list-all case, scope down to invoices whose underlying PO/SO
+    belongs to the user's own warehouse — SuperAdmin, General Manager, and
+    Accountant see payments company-wide (read-only for Accountant).
+    """
     await assert_permission(db, user.role, "invoices", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if invoice_id:
         query["invoice_id"] = invoice_id
+    else:
+        wh_filter = get_read_warehouse_filter(user)
+        if wh_filter is not None:
+            wh_pos = await db.purchase_orders.find({"warehouse_id": wh_filter}, {"_id": 0, "po_id": 1}).to_list(10000)
+            wh_sos = await db.sales_orders.find({"warehouse_id": wh_filter}, {"_id": 0, "so_id": 1}).to_list(10000)
+            allowed_refs = set([p["po_id"] for p in wh_pos] + [s["so_id"] for s in wh_sos])
+            allowed_invoices = await db.invoices.find(
+                {"reference_id": {"$in": list(allowed_refs)}}, {"_id": 0, "invoice_id": 1}
+            ).to_list(10000)
+            query["invoice_id"] = {"$in": [i["invoice_id"] for i in allowed_invoices]}
     
     payments = await db.payments.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return payments
@@ -2806,9 +2948,10 @@ async def get_dashboard_stats(user: User = Depends(get_current_user)):
     SuperAdmin, General Manager, Warehouse Manager, Accountant. Other
     roles have their own designated home and should not see this.
 
-    Warehouse Manager and Accountant only see figures scoped to their
-    assigned warehouse; company-wide inventory valuation is further
-    restricted to SuperAdmin/General Manager only.
+    SuperAdmin, General Manager, and Accountant see company-wide figures
+    (read-only for Accountant — they oversee the whole business but can't
+    adjust inventory or approve orders). Warehouse Manager only sees
+    figures scoped to their assigned warehouse.
     """
     if user.role not in DASHBOARD_ALLOWED_ROLES:
         raise HTTPException(
@@ -2818,9 +2961,9 @@ async def get_dashboard_stats(user: User = Depends(get_current_user)):
 
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Warehouse scope: None (cross-warehouse) for SuperAdmin/GM, otherwise
-    # restricted to the user's own warehouse.
-    wh_filter = get_user_warehouse_filter(user)
+    # Warehouse scope: None (company-wide) for SuperAdmin/GM/Accountant,
+    # otherwise restricted to the user's own warehouse (Warehouse Manager).
+    wh_filter = get_read_warehouse_filter(user)
     is_company_wide = wh_filter is None
 
     # Count totals
@@ -2829,10 +2972,11 @@ async def get_dashboard_stats(user: User = Depends(get_current_user)):
     total_agents = await db.users.count_documents({"role": "sales_rep", "is_active": True})
     total_warehouses = await db.warehouses.count_documents({"is_active": True})
 
-    # Calculate inventory value — company-wide valuation is restricted to
-    # SuperAdmin/General Manager only (see also /reports/stock-summary).
+    # Calculate inventory value — top echelon (SuperAdmin/GM/Accountant)
+    # may view it; Accountant's access here is still read-only, no write
+    # path exists through this endpoint regardless.
     total_inventory_value = 0.0
-    if user.role in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+    if is_top_echelon_read(user.role):
         inventory_query = {} if is_company_wide else {"warehouse_id": wh_filter}
         inventory = await db.inventory_stock.find(inventory_query, {"_id": 0}).to_list(10000)
         for stock in inventory:
@@ -2900,7 +3044,7 @@ async def get_recent_activity(limit: int = 10, user: User = Depends(get_current_
             detail="Your role does not have access to the overview dashboard."
         )
 
-    wh_filter = get_user_warehouse_filter(user)
+    wh_filter = get_read_warehouse_filter(user)
     wh_query = {} if wh_filter is None else {"warehouse_id": wh_filter}
 
     activities = []
@@ -2959,7 +3103,7 @@ async def get_sales_chart(days: int = 7, user: User = Depends(get_current_user))
             detail="Your role does not have access to the overview dashboard."
         )
 
-    wh_filter = get_user_warehouse_filter(user)
+    wh_filter = get_read_warehouse_filter(user)
     start_date = datetime.now(timezone.utc) - timedelta(days=days)
     
     chart_data = []
@@ -3002,7 +3146,7 @@ async def get_top_products(limit: int = 5, user: User = Depends(get_current_user
             detail="Your role does not have access to the overview dashboard."
         )
 
-    wh_filter = get_user_warehouse_filter(user)
+    wh_filter = get_read_warehouse_filter(user)
     wh_query = {} if wh_filter is None else {"warehouse_id": wh_filter}
 
     # Aggregate sales by product
@@ -3074,13 +3218,14 @@ async def mark_all_notifications_read(user: User = Depends(get_current_user)):
 async def get_stock_summary_report(warehouse_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Get stock summary report.
 
-    Restricted to SuperAdmin and General Manager only — this report exposes
-    company-wide inventory valuation, which lower roles must not see.
+    Restricted to SuperAdmin, General Manager, and Accountant (read-only
+    top-echelon oversight) — this report exposes company-wide inventory
+    valuation, which lower roles (including Warehouse Manager) must not see.
     """
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
         raise HTTPException(
             status_code=403,
-            detail="Only SuperAdmin and General Manager can view the Stock Summary report."
+            detail="Only SuperAdmin, General Manager, and Accountant can view the Stock Summary report."
         )
     await assert_permission(db, user.role, "reports", "read")
     query = {}
@@ -3118,9 +3263,10 @@ async def get_purchase_analysis_report(
     end_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get purchase analysis report"""
+    """Get purchase analysis report. Scoped to user's warehouse unless
+    they hold a top-echelon read role."""
     await assert_permission(db, user.role, "reports", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if start_date:
         query["order_date"] = {"$gte": datetime.fromisoformat(start_date)}
     if end_date:
@@ -3128,7 +3274,10 @@ async def get_purchase_analysis_report(
             query["order_date"]["$lte"] = datetime.fromisoformat(end_date)
         else:
             query["order_date"] = {"$lte": datetime.fromisoformat(end_date)}
-    
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter:
+        query["warehouse_id"] = wh_filter
+
     orders = await db.purchase_orders.find(query, {"_id": 0}).to_list(10000)
     
     # Aggregate by supplier
@@ -3156,9 +3305,10 @@ async def get_sales_analysis_report(
     end_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get sales analysis report"""
+    """Get sales analysis report. Scoped to user's warehouse unless
+    they hold a top-echelon read role."""
     await assert_permission(db, user.role, "reports", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if start_date:
         query["order_date"] = {"$gte": datetime.fromisoformat(start_date)}
     if end_date:
@@ -3166,7 +3316,10 @@ async def get_sales_analysis_report(
             query["order_date"]["$lte"] = datetime.fromisoformat(end_date)
         else:
             query["order_date"] = {"$lte": datetime.fromisoformat(end_date)}
-    
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter:
+        query["warehouse_id"] = wh_filter
+
     orders = await db.sales_orders.find(query, {"_id": 0}).to_list(10000)
     
     # Aggregate by sales rep
@@ -3226,8 +3379,16 @@ async def get_audit_logs(
     limit: int = 100,
     user: User = Depends(get_current_user)
 ):
-    """Get audit logs (admin only)"""
-    await assert_permission(db, user.role, "audit_logs", "read")
+    """Get audit logs.
+
+    Restricted to the top echelon — SuperAdmin, General Manager, and the
+    Accountant (read-only oversight of the whole business). Audit log
+    entries don't carry a warehouse_id (they span every entity type in the
+    system, many of which aren't warehouse-bound), so there's no reliable
+    way to scope this to a single warehouse for lower roles either way.
+    """
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
+        raise HTTPException(status_code=403, detail="Only SuperAdmin, General Manager, and Accountant can view audit logs.")
     
     query = {}
     if entity_type:
@@ -3350,6 +3511,7 @@ async def approve_expense(expense_id: str, user: User = Depends(get_current_user
 @api_router.delete("/expenses/{expense_id}")
 async def delete_expense(expense_id: str, user: User = Depends(get_current_user)):
     """Delete an expense"""
+    await assert_permission(db, user.role, "expenses", "delete")
     expense = await db.expenses.find_one({"expense_id": expense_id}, {"_id": 0})
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -3590,13 +3752,17 @@ async def get_delivery_notes(
     so_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get all delivery notes"""
+    """Get delivery notes. Confined to the user's warehouse unless they hold
+    a top-echelon read role (SuperAdmin/General Manager/Accountant)."""
     await assert_permission(db, user.role, "delivery_notes", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if status:
         query["status"] = status.value
     if so_id:
         query["so_id"] = so_id
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        query["warehouse_id"] = wh_filter
     
     notes = await db.delivery_notes.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return notes
@@ -3836,8 +4002,12 @@ async def get_profit_loss_report(
     end_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get Profit & Loss report"""
+    """Get Profit & Loss report — top-echelon only (company-wide financial statement)."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     # Default to current month
     if not start_date:
         start_date = datetime.now(timezone.utc).replace(day=1).isoformat()
@@ -3905,8 +4075,12 @@ async def get_cash_flow_report(
     end_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get Cash Flow report"""
+    """Get Cash Flow report — top-echelon only (company-wide financial statement)."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     if not start_date:
         start_date = datetime.now(timezone.utc).replace(day=1).isoformat()
     if not end_date:
@@ -3981,8 +4155,12 @@ async def get_cash_flow_report(
 
 @api_router.get("/reports/supplier-aging")
 async def get_supplier_aging_report(user: User = Depends(get_current_user)):
-    """Get Supplier Aging (Accounts Payable) report"""
+    """Get Supplier Aging (Accounts Payable) report — top-echelon only."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     today = datetime.now(timezone.utc)
     
     # Get unpaid purchase invoices
@@ -4056,8 +4234,12 @@ async def get_supplier_aging_report(user: User = Depends(get_current_user)):
 
 @api_router.get("/reports/customer-aging")
 async def get_customer_aging_report(user: User = Depends(get_current_user)):
-    """Get Customer Aging (Accounts Receivable) report"""
+    """Get Customer Aging (Accounts Receivable) report — top-echelon only."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     today = datetime.now(timezone.utc)
     
     # Get unpaid sales invoices
@@ -4137,10 +4319,21 @@ async def get_inventory_valuation_report(
     warehouse_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Get Inventory Valuation report"""
+    """Get Inventory Valuation report — top-echelon only.
+
+    Exposes per-product cost values across the inventory. Scoped to the
+    user's warehouse for Warehouse Manager; SuperAdmin/GM/Accountant see
+    company-wide (or can filter by a specific warehouse).
+    """
     await assert_permission(db, user.role, "reports", "read")
-    query = {}
-    if warehouse_id:
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+    query: Dict[str, Any] = {}
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter:
+        query["warehouse_id"] = wh_filter
+    elif warehouse_id:
         query["warehouse_id"] = warehouse_id
     
     stocks = await db.inventory_stock.find(query, {"_id": 0}).to_list(10000)
@@ -4371,6 +4564,7 @@ def generate_invoice_pdf(invoice_data: dict, items: list, company_name: str = "B
 @api_router.get("/invoices/{invoice_id}/pdf")
 async def get_invoice_pdf(invoice_id: str, user: User = Depends(get_current_user)):
     """Generate and return invoice PDF"""
+    await assert_permission(db, user.role, "invoices", "read")
     invoice = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -4401,6 +4595,7 @@ async def get_invoice_pdf(invoice_id: str, user: User = Depends(get_current_user
 @api_router.get("/invoices/{invoice_id}/pdf-base64")
 async def get_invoice_pdf_base64(invoice_id: str, user: User = Depends(get_current_user)):
     """Generate and return invoice PDF as base64 (for mobile)"""
+    await assert_permission(db, user.role, "invoices", "read")
     invoice = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -4507,13 +4702,14 @@ def generate_report_pdf(title: str, data: dict, report_type: str) -> bytes:
 async def get_stock_summary_pdf(warehouse_id: Optional[str] = None, user: User = Depends(get_current_user)):
     """Generate stock summary report PDF.
 
-    Restricted to SuperAdmin and General Manager only — this report exposes
-    company-wide inventory valuation, which lower roles must not see.
+    Restricted to SuperAdmin, General Manager, and Accountant (read-only
+    top-echelon oversight) — this report exposes company-wide inventory
+    valuation, which lower roles (including Warehouse Manager) must not see.
     """
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
         raise HTTPException(
             status_code=403,
-            detail="Only SuperAdmin and General Manager can view the Stock Summary report."
+            detail="Only SuperAdmin, General Manager, and Accountant can view the Stock Summary report."
         )
     # Get the data
     query = {}
@@ -4554,7 +4750,10 @@ async def get_profit_loss_pdf(
     end_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Generate P&L report PDF"""
+    """Generate P&L report PDF — top-echelon only."""
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
     # Reuse the existing P&L logic
     if not start_date:
         start_date = datetime.now(timezone.utc).replace(day=1).isoformat()
@@ -4654,7 +4853,12 @@ class SyncData(BaseModel):
 
 @api_router.post("/sync/pull")
 async def sync_pull(sync_data: SyncData, user: User = Depends(get_current_user)):
-    """Pull data changes since last sync for offline mode"""
+    """Pull data changes since last sync for offline mode.
+
+    Applies the same permission and warehouse-scoping rules as the regular
+    REST endpoints for each entity type — this is just a bulk/delta version
+    of those same reads, not a bypass of them.
+    """
     last_sync_dt = None
     if sync_data.last_sync:
         try:
@@ -4662,7 +4866,7 @@ async def sync_pull(sync_data: SyncData, user: User = Depends(get_current_user))
         except:
             pass
     
-    query = {}
+    query: Dict[str, Any] = {}
     if last_sync_dt:
         query["updated_at"] = {"$gt": last_sync_dt}
     
@@ -4678,12 +4882,36 @@ async def sync_pull(sync_data: SyncData, user: User = Depends(get_current_user))
     
     if sync_data.entity_type not in collection_map:
         raise HTTPException(status_code=400, detail=f"Unknown entity type: {sync_data.entity_type}")
+
+    # Map each syncable entity type to the permission module that governs it
+    permission_module_map = {
+        "products": "products",
+        "suppliers": "suppliers",
+        "distributors": "suppliers",
+        "warehouses": "warehouses",
+        "inventory": "inventory",
+        "purchase_orders": "purchase_orders",
+        "sales_orders": "sales_orders",
+    }
+    await assert_permission(db, user.role, permission_module_map[sync_data.entity_type], "read")
+
+    # Warehouse-scope the entity types that carry a warehouse_id, exactly
+    # like their corresponding REST list endpoints do.
+    warehouse_scoped_types = {"inventory", "purchase_orders", "sales_orders"}
+    if sync_data.entity_type in warehouse_scoped_types:
+        if sync_data.entity_type == "sales_orders" and user.role == UserRole.SALES_REP.value:
+            query["sales_rep_id"] = user.user_id
+        else:
+            wh_filter = get_read_warehouse_filter(user)
+            if wh_filter is not None:
+                query["warehouse_id"] = wh_filter
     
     collection = collection_map[sync_data.entity_type]
     
     # For inventory, we use last_updated instead of updated_at
     if sync_data.entity_type == "inventory" and last_sync_dt:
-        query = {"last_updated": {"$gt": last_sync_dt}}
+        query["last_updated"] = {"$gt": last_sync_dt}
+        query.pop("updated_at", None)
     
     data = await collection.find(query, {"_id": 0}).to_list(10000)
     
@@ -4696,7 +4924,19 @@ async def sync_pull(sync_data: SyncData, user: User = Depends(get_current_user))
 
 @api_router.post("/sync/push")
 async def sync_push(sync_data: SyncData, user: User = Depends(get_current_user)):
-    """Push local changes to server for offline mode"""
+    """Push local changes to server for offline mode.
+
+    Only stock_adjustments are currently supported here, and creating a
+    stock adjustment requires the same permission as the regular
+    /inventory/adjust endpoint — this is not a separate, unguarded path
+    to mutate inventory.
+    """
+    if sync_data.entity_type == "stock_adjustments" and sync_data.local_changes:
+        if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only SuperAdmin and General Manager can stock or restock inventory."
+            )
     if not sync_data.local_changes:
         return {"message": "No changes to sync", "synced": 0}
     
@@ -4839,6 +5079,7 @@ async def list_requisitions(
 @api_router.get("/requisitions/{requisition_id}")
 async def get_requisition(requisition_id: str, user: User = Depends(get_current_user)):
     """Get requisition by ID"""
+    await assert_permission(db, user.role, "requisitions", "read")
     req = await db.requisitions.find_one({"requisition_id": requisition_id})
     if not req:
         raise HTTPException(status_code=404, detail="Requisition not found")
@@ -4890,6 +5131,12 @@ async def submit_requisition(requisition_id: str, user: User = Depends(get_curre
     req = await db.requisitions.find_one({"requisition_id": requisition_id})
     if not req:
         raise HTTPException(status_code=404, detail="Requisition not found")
+
+    # Only the original requester, or someone with broader requisitions
+    # update rights (Warehouse Manager/SuperAdmin/GM), can submit it.
+    is_owner = req.get("requested_by") == user.user_id
+    if not is_owner:
+        await assert_permission(db, user.role, "requisitions", "update")
     
     if req["status"] != "draft":
         raise HTTPException(status_code=400, detail="Only draft requisitions can be submitted")
@@ -4961,6 +5208,7 @@ async def convert_requisition_to_po(
     user: User = Depends(get_current_user)
 ):
     """Convert approved requisition to Purchase Order"""
+    await assert_permission(db, user.role, "purchase_orders", "create")
     req = await db.requisitions.find_one({"requisition_id": requisition_id})
     if not req:
         raise HTTPException(status_code=404, detail="Requisition not found")
@@ -5025,13 +5273,17 @@ async def list_grns(
     po_id: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """List all Goods Receipt Notes"""
+    """List Goods Receipt Notes. Confined to the user's warehouse unless
+    they hold a top-echelon read role (SuperAdmin/General Manager/Accountant)."""
     await assert_permission(db, user.role, "grn", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if status:
         query["status"] = status.value
     if po_id:
         query["po_id"] = po_id
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        query["warehouse_id"] = wh_filter
     
     grns = await db.grns.find(query).sort("created_at", -1).to_list(100)
     return grns
@@ -5117,9 +5369,11 @@ async def create_grn(data: GRNCreate, user: User = Depends(get_current_user)):
 @api_router.put("/grn/{grn_id}/status")
 async def update_grn_status(grn_id: str, status: GRNStatus, user: User = Depends(get_current_user)):
     """Update GRN status"""
+    await assert_permission(db, user.role, "grn", "update")
     grn = await db.grns.find_one({"grn_id": grn_id})
     if not grn:
         raise HTTPException(status_code=404, detail="GRN not found")
+    assert_same_warehouse(user, grn["warehouse_id"], "update this GRN")
     
     await db.grns.update_one(
         {"grn_id": grn_id},
@@ -5137,11 +5391,22 @@ async def list_matches(
     status: Optional[MatchingStatus] = None,
     user: User = Depends(get_current_user)
 ):
-    """List all 3-way matches"""
+    """List 3-way matches.
+
+    Matches don't carry warehouse_id directly — they reference a PO.
+    SuperAdmin, General Manager, and Accountant see every match; everyone
+    else is confined to matches whose underlying PO belongs to their own
+    warehouse.
+    """
     await assert_permission(db, user.role, "three_way_match", "read")
-    query = {}
+    query: Dict[str, Any] = {}
     if status:
         query["status"] = status.value
+
+    wh_filter = get_read_warehouse_filter(user)
+    if wh_filter is not None:
+        wh_pos = await db.purchase_orders.find({"warehouse_id": wh_filter}, {"_id": 0, "po_id": 1}).to_list(10000)
+        query["po_id"] = {"$in": [p["po_id"] for p in wh_pos]}
     
     matches = await db.three_way_matches.find(query).sort("created_at", -1).to_list(100)
     return matches
@@ -5259,8 +5524,12 @@ async def get_trial_balance(
     as_of_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Generate Trial Balance Report"""
+    """Generate Trial Balance Report — top-echelon only (company-wide financial statement)."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     date = datetime.fromisoformat(as_of_date) if as_of_date else datetime.now(timezone.utc)
     
     # Get all accounts
@@ -5358,8 +5627,11 @@ async def get_balance_sheet(
     as_of_date: Optional[str] = None,
     user: User = Depends(get_current_user)
 ):
-    """Generate Balance Sheet Report"""
+    """Generate Balance Sheet Report — top-echelon only (company-wide financial statement)."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
     date = datetime.fromisoformat(as_of_date) if as_of_date else datetime.now(timezone.utc)
     
     # ASSETS
@@ -5466,8 +5738,12 @@ async def get_balance_sheet(
 
 @api_router.get("/reports/supplier-performance")
 async def get_supplier_performance(user: User = Depends(get_current_user)):
-    """Get supplier performance dashboard data"""
+    """Get supplier performance dashboard data — top-echelon read only."""
     await assert_permission(db, user.role, "reports", "read")
+    if not is_top_echelon_read(user.role):
+        raise HTTPException(status_code=403,
+            detail="Only SuperAdmin, General Manager, and Accountant can view this report.")
+
     suppliers = await db.suppliers.find({}).to_list(100)
     
     performance_data = []
@@ -5642,14 +5918,20 @@ async def submit_agent_quotation(quotation_id: str, user: User = Depends(get_cur
         }}
     )
 
-    # Notify warehouse managers and accountants
-    mgr_ids = await get_warehouse_staff_ids(
-        qt["warehouse_id"],
-        [UserRole.WAREHOUSE_MANAGER, UserRole.ACCOUNTANT]
-    )
+    # Notify approvers: the warehouse's own Warehouse Manager, plus all
+    # SuperAdmin/General Manager users company-wide (they are cross-warehouse
+    # roles and are not tied to any single warehouse_id, so they must be
+    # looked up separately from get_warehouse_staff_ids).
+    wh_mgr_ids = await get_warehouse_staff_ids(qt["warehouse_id"], [UserRole.WAREHOUSE_MANAGER])
+    cross_wh_approvers = await db.users.find(
+        {"role": {"$in": [UserRole.SUPER_ADMIN.value, UserRole.GENERAL_MANAGER.value]}, "is_active": True},
+        {"_id": 0, "user_id": 1}
+    ).to_list(100)
+    approver_ids = list({*wh_mgr_ids, *[u["user_id"] for u in cross_wh_approvers]})
+
     flag_note = f" ⚠️ AGENT FLAGGED (Outstanding: {outstanding:.2f} / Ceiling: {ceiling:.2f})" if flagged else ""
     await send_notification(
-        mgr_ids,
+        approver_ids,
         "New Quotation Awaiting Approval",
         f"{user.name} submitted quotation {qt['quotation_number']} for {qt['total_amount']:.2f}.{flag_note}",
         "warning" if flagged else "info"
@@ -5793,13 +6075,18 @@ async def reject_agent_quotation(quotation_id: str, body: AgentQuotationApprove,
 
 @api_router.get("/sales-orders/pending-dispatch")
 async def get_pending_dispatch_orders(user: User = Depends(get_current_user)):
-    """Warehouse staff view: approved Sales Orders awaiting goods release."""
+    """Warehouse staff view: approved Sales Orders awaiting goods release.
+
+    Sales Clerk and Warehouse Manager are scoped to their own warehouse.
+    SuperAdmin, General Manager, and Accountant (top-echelon read) see
+    pending dispatch across all warehouses.
+    """
     if user.role not in [UserRole.SALES_CLERK, UserRole.WAREHOUSE_MANAGER,
                           UserRole.ACCOUNTANT, UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
 
     query: Dict[str, Any] = {"status": OrderStatus.APPROVED.value}
-    wh_filter = get_user_warehouse_filter(user)
+    wh_filter = get_read_warehouse_filter(user)
     if wh_filter:
         query["warehouse_id"] = wh_filter
 
@@ -6245,10 +6532,13 @@ async def cancel_warehouse_transfer(transfer_id: str, user: User = Depends(get_c
 
 @api_router.get("/inventory/all-warehouses")
 async def get_all_warehouses_inventory(user: User = Depends(get_current_user)):
-    """Consolidated inventory view across all warehouses — SuperAdmin/GM/Accountant"""
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
-                          UserRole.ACCOUNTANT,
-                          UserRole.WAREHOUSE_MANAGER]:
+    """Consolidated inventory view across all warehouses — top echelon only.
+
+    Restricted to SuperAdmin, General Manager, and Accountant (read-only).
+    No other role, including Warehouse Manager, gets a cross-warehouse
+    breakdown.
+    """
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
         raise HTTPException(status_code=403, detail="Not authorized for cross-warehouse inventory")
 
     warehouses = await db.warehouses.find({"is_active": True}, {"_id": 0}).to_list(100)
@@ -6466,15 +6756,21 @@ async def update_role_permissions(
 ):
     """
     Overwrite CRUD permissions for a role.
-    Accessible to Super Admin, General Manager, and Accountant.
+    Accessible to Super Admin and General Manager ONLY.
+
+    This is the master switch for the entire authorization system — letting
+    Accountant (or any non-top-admin role) write here would let them grant
+    themselves or anyone else arbitrary access, bypassing every other
+    restriction in the app. Accountant retains read-only visibility into
+    the current permission matrix (see the GET endpoint) but cannot change it.
 
     Rules enforced server-side:
     - super_admin and general_manager always retain full access (cannot be downgraded).
     - accountant always retains read=True on every module (cannot lose visibility).
     - Payload may contain a subset of modules; missing modules keep their current values.
     """
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
-        raise HTTPException(status_code=403, detail="Only Super Admin, General Manager, or Accountant can modify role permissions")
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        raise HTTPException(status_code=403, detail="Only Super Admin or General Manager can modify role permissions")
 
     valid_roles = [r.value for r in UserRole]
     if role not in valid_roles:
@@ -6536,10 +6832,12 @@ async def update_role_permissions(
 async def reset_role_permissions(role: str, user: User = Depends(get_current_user)):
     """
     Reset a role's permissions back to the hardcoded defaults.
-    Accessible to Super Admin, General Manager, and Accountant.
+    Accessible to Super Admin and General Manager ONLY — same reasoning as
+    update_role_permissions above; this is system-configuration, not a
+    finance-critical action, so Accountant is read-only here too.
     """
-    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER, UserRole.ACCOUNTANT]:
-        raise HTTPException(status_code=403, detail="Only Super Admin, General Manager, or Accountant can reset role permissions")
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        raise HTTPException(status_code=403, detail="Only Super Admin or General Manager can reset role permissions")
 
     valid_roles = [r.value for r in UserRole]
     if role not in valid_roles:
