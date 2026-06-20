@@ -19,6 +19,7 @@ import {
   LoadingScreen,
 } from '../../src/components/ThemedComponents';
 import { useAppStore } from '../../src/store/appStore';
+import { useAuthStore } from '../../src/store/authStore';
 import { formatCurrency } from '../../src/config/clientConfig';
 import { Product } from '../../src/types';
 
@@ -26,6 +27,10 @@ export default function ProductDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { products, inventory, fetchProducts, fetchInventory } = useAppStore();
+  const { user } = useAuthStore();
+  // Manual stock adjustment ("stocking and restocking") — SuperAdmin and
+  // General Manager only, per the hard-coded /inventory/adjust guard.
+  const canAdjustStock = user?.role === 'super_admin' || user?.role === 'general_manager';
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -182,12 +187,14 @@ export default function ProductDetailScreen() {
 
         {/* Actions */}
         <View style={styles.actionsContainer}>
-          <Button
-            title="Adjust Stock"
-            variant="primary"
-            onPress={() => Alert.alert('Adjust Stock', 'Navigate to stock adjustment')}
-            style={styles.actionButton}
-          />
+          {canAdjustStock && (
+            <Button
+              title="Adjust Stock"
+              variant="primary"
+              onPress={() => Alert.alert('Adjust Stock', 'Navigate to stock adjustment')}
+              style={styles.actionButton}
+            />
+          )}
           <Button
             title="View History"
             variant="secondary"
