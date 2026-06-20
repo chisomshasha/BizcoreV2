@@ -20,7 +20,9 @@ interface AuthState {
   isCrossWarehouse: boolean;
   isApprover: boolean;
   isAgent: boolean;
-  isClerk: boolean;
+  isClerk: boolean;      // true for sales_clerk only (kept for backward compat)
+  isSalesClerk: boolean;
+  isPurchaseClerk: boolean;
   isAccountant: boolean;
   sessionToken: string | null;
   sessionExpiresAt: string | null;
@@ -35,7 +37,8 @@ function deriveFlags(user: User | null) {
   if (!user) {
     return { warehouseId: null, warehouseName: null, isSuperAdmin: false,
              isGeneralManager: false, isWarehouseManager: false, isCrossWarehouse: false,
-             isApprover: false, isAgent: false, isClerk: false, isAccountant: false };
+             isApprover: false, isAgent: false, isClerk: false, isAccountant: false,
+             isSalesClerk: false, isPurchaseClerk: false };
   }
   const role = user.role as UserRole;
   return {
@@ -47,7 +50,10 @@ function deriveFlags(user: User | null) {
     isCrossWarehouse: isCrossWarehouseRole(role),
     isApprover: canApproveQuotations(role),
     isAgent: isSalesRep(role),
+    // isClerk kept for backward compat — true only for sales_clerk
     isClerk: role === 'sales_clerk',
+    isSalesClerk: role === 'sales_clerk',
+    isPurchaseClerk: role === 'purchase_clerk',
     isAccountant: role === 'accountant',
   };
 }
@@ -85,6 +91,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   isApprover: false,
   isAgent: false,
   isClerk: false,
+  isSalesClerk: false,
+  isPurchaseClerk: false,
   isAccountant: false,
   sessionToken: null,
   sessionExpiresAt: null,
