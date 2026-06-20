@@ -300,10 +300,23 @@ export default function MoreScreen() {
           </View>
         </Card>
 
-        {/* Admin Section — hidden from sales reps */}
-        {!isAgent && (
+        {/* Warehouses — everyone can view (read-only for non-managers; the
+            create/delete controls inside the modal are gated separately) */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Locations</Text>
+          <ListItem
+            title="Warehouses"
+            subtitle={`${warehouses.length} locations`}
+            leftIcon="home-outline"
+            onPress={() => setShowWarehouseModal(true)}
+          />
+        </View>
+
+        {/* Admin Section — hidden from sales reps, sales clerks, and purchase clerks */}
+        {!isAgent && !isSalesClerk && !isPurchaseClerk && (isSuperAdmin || isGeneralManager || isWarehouseManager || isAccountant) && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Administration</Text>
+            {/* Users — SuperAdmin/GM/Warehouse Manager (full), Accountant (read-only) */}
             <ListItem
               title="Users"
               subtitle="Manage team members and roles"
@@ -313,18 +326,15 @@ export default function MoreScreen() {
                 loadUsers();
               }}
             />
-            <ListItem
-              title="Warehouses"
-              subtitle={`${warehouses.length} locations`}
-              leftIcon="home-outline"
-              onPress={() => setShowWarehouseModal(true)}
-            />
-            <ListItem
-              title="Audit Logs"
-              subtitle="Track system activity"
-              leftIcon="time-outline"
-              onPress={() => router.push('/audit-logs')}
-            />
+            {/* Audit Logs — top echelon only (SuperAdmin/GM/Accountant) */}
+            {isTopEchelon && (
+              <ListItem
+                title="Audit Logs"
+                subtitle="Track system activity"
+                leftIcon="time-outline"
+                onPress={() => router.push('/audit-logs')}
+              />
+            )}
             {(isSuperAdmin || isGeneralManager || role === 'accountant') && (
               <ListItem
                 title="Role Permissions"
@@ -517,27 +527,29 @@ export default function MoreScreen() {
               </TouchableOpacity>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
-              {/* Add New Warehouse */}
-              <View style={styles.addWarehouseSection}>
-                <Text style={styles.subsectionTitle}>Add New Warehouse</Text>
-                <Input
-                  label="Name *"
-                  value={warehouseForm.name}
-                  onChangeText={(text) => setWarehouseForm({ ...warehouseForm, name: text })}
-                  placeholder="Enter warehouse name"
-                />
-                <Input
-                  label="Address"
-                  value={warehouseForm.address}
-                  onChangeText={(text) => setWarehouseForm({ ...warehouseForm, address: text })}
-                  placeholder="Enter address"
-                />
-                <Button
-                  title="Add Warehouse"
-                  onPress={handleCreateWarehouse}
-                  style={{ marginTop: 8 }}
-                />
-              </View>
+              {/* Add New Warehouse — SuperAdmin/GM/Warehouse Manager only */}
+              {(isSuperAdmin || isGeneralManager || isWarehouseManager) && (
+                <View style={styles.addWarehouseSection}>
+                  <Text style={styles.subsectionTitle}>Add New Warehouse</Text>
+                  <Input
+                    label="Name *"
+                    value={warehouseForm.name}
+                    onChangeText={(text) => setWarehouseForm({ ...warehouseForm, name: text })}
+                    placeholder="Enter warehouse name"
+                  />
+                  <Input
+                    label="Address"
+                    value={warehouseForm.address}
+                    onChangeText={(text) => setWarehouseForm({ ...warehouseForm, address: text })}
+                    placeholder="Enter address"
+                  />
+                  <Button
+                    title="Add Warehouse"
+                    onPress={handleCreateWarehouse}
+                    style={{ marginTop: 8 }}
+                  />
+                </View>
+              )}
 
               {/* Existing Warehouses */}
               <Text style={styles.subsectionTitle}>Existing Warehouses</Text>
@@ -552,12 +564,15 @@ export default function MoreScreen() {
                         <Text style={styles.warehouseAddress}>{warehouse.address}</Text>
                       )}
                     </View>
-                    <TouchableOpacity
-                      style={styles.deleteButton}
-                      onPress={() => handleDeleteWarehouse(warehouse)}
-                    >
-                      <Ionicons name="trash-outline" size={20} color={Colors.danger} />
-                    </TouchableOpacity>
+                    {/* Delete — SuperAdmin/GM/Warehouse Manager only */}
+                    {(isSuperAdmin || isGeneralManager || isWarehouseManager) && (
+                      <TouchableOpacity
+                        style={styles.deleteButton}
+                        onPress={() => handleDeleteWarehouse(warehouse)}
+                      >
+                        <Ionicons name="trash-outline" size={20} color={Colors.danger} />
+                      </TouchableOpacity>
+                    )}
                   </View>
                 ))
               )}
@@ -573,7 +588,7 @@ export default function MoreScreen() {
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Team Members</Text>
               <View style={{ flexDirection: 'row', gap: 12 }}>
-                {(isSuperAdmin || isGeneralManager || role === 'accountant') && (
+                {(isSuperAdmin || isGeneralManager || isWarehouseManager) && (
                   <TouchableOpacity
                     onPress={() => {
                       setEditingUser(null);
@@ -638,7 +653,7 @@ export default function MoreScreen() {
                           {getRoleLabel(u.role)}
                         </Text>
                       </View>
-                      {(isSuperAdmin || isGeneralManager || role === 'accountant') && u.user_id !== user?.user_id && (
+                      {(isSuperAdmin || isGeneralManager || isWarehouseManager) && u.user_id !== user?.user_id && (
                         <>
                           <TouchableOpacity
                             onPress={() => {
@@ -724,10 +739,18 @@ export default function MoreScreen() {
 
               <Text style={styles.formLabel}>Role *</Text>
               <View style={styles.roleSelector}>
-                {(['viewer', 'sales_clerk', 'purchase_clerk', 'sales_rep',
-                   'accountant', 'warehouse_manager', 'general_manager']
-                  .filter((r) => r !== 'super_admin' || isSuperAdmin)
-                ).map((r) => (
+                {(() => {
+                  // Mirrors backend _ROLE_RANK — a user can only assign a
+                  // role strictly below their own (SuperAdmin is exempt).
+                  const ROLE_RANK: Record<string, number> = {
+                    viewer: 1, sales_clerk: 2, purchase_clerk: 2, sales_rep: 3,
+                    accountant: 4, warehouse_manager: 5, general_manager: 6, super_admin: 7,
+                  };
+                  const callerRank = ROLE_RANK[role] ?? 0;
+                  const allRoles = ['viewer', 'sales_clerk', 'purchase_clerk', 'sales_rep',
+                                     'accountant', 'warehouse_manager', 'general_manager', 'super_admin'];
+                  return allRoles.filter((r) => isSuperAdmin || ROLE_RANK[r] < callerRank);
+                })().map((r) => (
                   <TouchableOpacity
                     key={r}
                     style={[
