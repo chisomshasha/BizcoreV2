@@ -355,7 +355,7 @@ class Company(BaseModel):
     address: Optional[str] = None
     tax_id: Optional[str] = None
     logo_url: Optional[str] = None
-    currency: str = "USD"
+    currency: str = "NGN"
     fiscal_year_start: int = 1  # Month (1-12)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -363,7 +363,7 @@ class CompanyCreate(BaseModel):
     name: str
     address: Optional[str] = None
     tax_id: Optional[str] = None
-    currency: str = "USD"
+    currency: str = "NGN"
 
 # Warehouse Model
 class Warehouse(BaseModel):
@@ -1968,7 +1968,7 @@ async def get_company(user: User = Depends(get_current_user)):
     if not company:
         default_company = Company(
             name="My Company",
-            currency="USD"
+            currency="NGN"
         )
         await db.companies.insert_one(default_company.model_dump())
         return default_company
@@ -2250,7 +2250,18 @@ async def get_inventory_by_warehouse(
 
 @api_router.post("/inventory/adjust")
 async def adjust_inventory(adjustment: StockTransactionCreate, user: User = Depends(get_current_user)):
-    """Adjust inventory (damage, return, conversion)"""
+    """Adjust inventory (damage, return, conversion, stocking, restocking).
+
+    Restricted to SuperAdmin and General Manager only — lower roles
+    (Warehouse Manager, Purchase Clerk, etc.) must not be able to stock or
+    restock inventory directly, regardless of their general 'inventory'
+    module permission.
+    """
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only SuperAdmin and General Manager can stock or restock inventory."
+        )
     await assert_permission(db, user.role, "inventory", "update")
     # Find or create stock record
     stock = await db.inventory_stock.find_one({
@@ -2778,46 +2789,80 @@ async def create_account(account_data: ChartOfAccountCreate, user: User = Depend
 # DASHBOARD ENDPOINTS
 # ========================
 
+# Roles whose designated area of the app is an overview of the business
+# (or their warehouse). Field/operational roles (sales_rep, sales_clerk,
+# purchase_clerk, viewer) have their own designated screens and must not
+# see the company-wide Home dashboard.
+DASHBOARD_ALLOWED_ROLES = [
+    UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER,
+    UserRole.WAREHOUSE_MANAGER, UserRole.ACCOUNTANT,
+]
+
 @api_router.get("/dashboard/stats")
 async def get_dashboard_stats(user: User = Depends(get_current_user)):
-    """Get dashboard statistics"""
+    """Get dashboard statistics.
+
+    Restricted to roles that oversee the business (or their warehouse):
+    SuperAdmin, General Manager, Warehouse Manager, Accountant. Other
+    roles have their own designated home and should not see this.
+
+    Warehouse Manager and Accountant only see figures scoped to their
+    assigned warehouse; company-wide inventory valuation is further
+    restricted to SuperAdmin/General Manager only.
+    """
+    if user.role not in DASHBOARD_ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the overview dashboard."
+        )
+
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
+    # Warehouse scope: None (cross-warehouse) for SuperAdmin/GM, otherwise
+    # restricted to the user's own warehouse.
+    wh_filter = get_user_warehouse_filter(user)
+    is_company_wide = wh_filter is None
+
     # Count totals
     total_products = await db.products.count_documents({"is_active": True})
     total_suppliers = await db.suppliers.count_documents({"is_active": True})
     total_agents = await db.users.count_documents({"role": "sales_rep", "is_active": True})
     total_warehouses = await db.warehouses.count_documents({"is_active": True})
-    
-    # Calculate inventory value
-    inventory = await db.inventory_stock.find({}, {"_id": 0}).to_list(10000)
+
+    # Calculate inventory value — company-wide valuation is restricted to
+    # SuperAdmin/General Manager only (see also /reports/stock-summary).
     total_inventory_value = 0.0
-    for stock in inventory:
-        product = await db.products.find_one({"product_id": stock["product_id"]}, {"_id": 0})
-        if product:
-            total_inventory_value += stock.get("quantity", 0) * product.get("cost_price", 0)
-    
+    if user.role in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        inventory_query = {} if is_company_wide else {"warehouse_id": wh_filter}
+        inventory = await db.inventory_stock.find(inventory_query, {"_id": 0}).to_list(10000)
+        for stock in inventory:
+            product = await db.products.find_one({"product_id": stock["product_id"]}, {"_id": 0})
+            if product:
+                total_inventory_value += stock.get("quantity", 0) * product.get("cost_price", 0)
+
     # Count low stock items
     low_stock_items = await get_low_stock_items(user)
     low_stock_count = len(low_stock_items)
-    
-    # Today's sales
-    today_sales_orders = await db.sales_orders.find({
-        "order_date": {"$gte": today}
-    }, {"_id": 0}).to_list(1000)
+
+    # Today's sales (scoped to the user's warehouse unless cross-warehouse)
+    sales_query = {"order_date": {"$gte": today}}
+    if not is_company_wide:
+        sales_query["warehouse_id"] = wh_filter
+    today_sales_orders = await db.sales_orders.find(sales_query, {"_id": 0}).to_list(1000)
     today_sales = sum(so.get("total_amount", 0) for so in today_sales_orders)
-    
-    # Today's purchases
-    today_purchase_orders = await db.purchase_orders.find({
-        "order_date": {"$gte": today}
-    }, {"_id": 0}).to_list(1000)
+
+    # Today's purchases (scoped to the user's warehouse unless cross-warehouse)
+    purchases_query = {"order_date": {"$gte": today}}
+    if not is_company_wide:
+        purchases_query["warehouse_id"] = wh_filter
+    today_purchase_orders = await db.purchase_orders.find(purchases_query, {"_id": 0}).to_list(1000)
     today_purchases = sum(po.get("total_amount", 0) for po in today_purchase_orders)
-    
+
     # Pending invoices
     pending_invoices = await db.invoices.count_documents({
         "status": {"$in": [InvoiceStatus.UNPAID.value, InvoiceStatus.PARTIAL.value]}
     })
-    
+
     # Cash balance (simplified - sum of all payments minus purchase payments)
     all_payments = await db.payments.find({}, {"_id": 0}).to_list(10000)
     cash_balance = 0.0
@@ -2828,7 +2873,7 @@ async def get_dashboard_stats(user: User = Depends(get_current_user)):
                 cash_balance += payment["amount"]
             else:
                 cash_balance -= payment["amount"]
-    
+
     return DashboardStats(
         total_inventory_value=round(total_inventory_value, 2),
         low_stock_count=low_stock_count,
@@ -2844,11 +2889,24 @@ async def get_dashboard_stats(user: User = Depends(get_current_user)):
 
 @api_router.get("/dashboard/recent-activity")
 async def get_recent_activity(limit: int = 10, user: User = Depends(get_current_user)):
-    """Get recent activity feed"""
+    """Get recent activity feed.
+
+    Restricted to the same roles as the rest of the Home dashboard, and
+    scoped to the user's warehouse unless they hold a cross-warehouse role.
+    """
+    if user.role not in DASHBOARD_ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the overview dashboard."
+        )
+
+    wh_filter = get_user_warehouse_filter(user)
+    wh_query = {} if wh_filter is None else {"warehouse_id": wh_filter}
+
     activities = []
     
     # Recent purchase orders
-    recent_pos = await db.purchase_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    recent_pos = await db.purchase_orders.find(wh_query, {"_id": 0}).sort("created_at", -1).to_list(5)
     for po in recent_pos:
         activities.append({
             "type": "purchase_order",
@@ -2860,7 +2918,7 @@ async def get_recent_activity(limit: int = 10, user: User = Depends(get_current_
         })
     
     # Recent sales orders
-    recent_sos = await db.sales_orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    recent_sos = await db.sales_orders.find(wh_query, {"_id": 0}).sort("created_at", -1).to_list(5)
     for so in recent_sos:
         activities.append({
             "type": "sales_order",
@@ -2872,7 +2930,7 @@ async def get_recent_activity(limit: int = 10, user: User = Depends(get_current_
         })
     
     # Recent stock transactions
-    recent_txns = await db.stock_transactions.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
+    recent_txns = await db.stock_transactions.find(wh_query, {"_id": 0}).sort("created_at", -1).to_list(5)
     for txn in recent_txns:
         product = await db.products.find_one({"product_id": txn["product_id"]}, {"_id": 0})
         activities.append({
@@ -2890,7 +2948,18 @@ async def get_recent_activity(limit: int = 10, user: User = Depends(get_current_
 
 @api_router.get("/dashboard/sales-chart")
 async def get_sales_chart(days: int = 7, user: User = Depends(get_current_user)):
-    """Get sales vs purchases chart data"""
+    """Get sales vs purchases chart data.
+
+    Restricted to the same roles as the rest of the Home dashboard, and
+    scoped to the user's warehouse unless they hold a cross-warehouse role.
+    """
+    if user.role not in DASHBOARD_ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the overview dashboard."
+        )
+
+    wh_filter = get_user_warehouse_filter(user)
     start_date = datetime.now(timezone.utc) - timedelta(days=days)
     
     chart_data = []
@@ -2899,15 +2968,17 @@ async def get_sales_chart(days: int = 7, user: User = Depends(get_current_user))
         next_date = date + timedelta(days=1)
         
         # Sales for the day
-        day_sales = await db.sales_orders.find({
-            "order_date": {"$gte": date, "$lt": next_date}
-        }, {"_id": 0}).to_list(1000)
+        sales_query = {"order_date": {"$gte": date, "$lt": next_date}}
+        if wh_filter is not None:
+            sales_query["warehouse_id"] = wh_filter
+        day_sales = await db.sales_orders.find(sales_query, {"_id": 0}).to_list(1000)
         total_sales = sum(so.get("total_amount", 0) for so in day_sales)
         
         # Purchases for the day
-        day_purchases = await db.purchase_orders.find({
-            "order_date": {"$gte": date, "$lt": next_date}
-        }, {"_id": 0}).to_list(1000)
+        purchases_query = {"order_date": {"$gte": date, "$lt": next_date}}
+        if wh_filter is not None:
+            purchases_query["warehouse_id"] = wh_filter
+        day_purchases = await db.purchase_orders.find(purchases_query, {"_id": 0}).to_list(1000)
         total_purchases = sum(po.get("total_amount", 0) for po in day_purchases)
         
         chart_data.append({
@@ -2920,11 +2991,24 @@ async def get_sales_chart(days: int = 7, user: User = Depends(get_current_user))
 
 @api_router.get("/dashboard/top-products")
 async def get_top_products(limit: int = 5, user: User = Depends(get_current_user)):
-    """Get top selling products"""
+    """Get top selling products.
+
+    Restricted to the same roles as the rest of the Home dashboard, and
+    scoped to the user's warehouse unless they hold a cross-warehouse role.
+    """
+    if user.role not in DASHBOARD_ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to the overview dashboard."
+        )
+
+    wh_filter = get_user_warehouse_filter(user)
+    wh_query = {} if wh_filter is None else {"warehouse_id": wh_filter}
+
     # Aggregate sales by product
     product_sales = {}
     
-    sales_orders = await db.sales_orders.find({}, {"_id": 0}).to_list(1000)
+    sales_orders = await db.sales_orders.find(wh_query, {"_id": 0}).to_list(1000)
     for so in sales_orders:
         for item in so.get("items", []):
             pid = item["product_id"]
@@ -2988,7 +3072,16 @@ async def mark_all_notifications_read(user: User = Depends(get_current_user)):
 
 @api_router.get("/reports/stock-summary")
 async def get_stock_summary_report(warehouse_id: Optional[str] = None, user: User = Depends(get_current_user)):
-    """Get stock summary report"""
+    """Get stock summary report.
+
+    Restricted to SuperAdmin and General Manager only — this report exposes
+    company-wide inventory valuation, which lower roles must not see.
+    """
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only SuperAdmin and General Manager can view the Stock Summary report."
+        )
     await assert_permission(db, user.role, "reports", "read")
     query = {}
     if warehouse_id:
@@ -4221,8 +4314,8 @@ def generate_invoice_pdf(invoice_data: dict, items: list, company_name: str = "B
                 str(i),
                 item.get("product_name", "N/A"),
                 str(qty),
-                f"${price:.2f}",
-                f"${total:.2f}"
+                f"NGN {price:,.2f}",
+                f"NGN {total:,.2f}"
             ])
         
         items_table = Table(items_data, colWidths=[0.5*inch, 3*inch, 1*inch, 1*inch, 1*inch])
@@ -4247,11 +4340,11 @@ def generate_invoice_pdf(invoice_data: dict, items: list, company_name: str = "B
     paid = invoice_data.get("paid_amount", 0)
     
     totals_data = [
-        ["", "", "Subtotal:", f"${subtotal:.2f}"],
-        ["", "", "Tax:", f"${tax:.2f}"],
-        ["", "", "Total:", f"${total:.2f}"],
-        ["", "", "Paid:", f"${paid:.2f}"],
-        ["", "", "Balance Due:", f"${(total - paid):.2f}"],
+        ["", "", "Subtotal:", f"NGN {subtotal:,.2f}"],
+        ["", "", "Tax:", f"NGN {tax:,.2f}"],
+        ["", "", "Total:", f"NGN {total:,.2f}"],
+        ["", "", "Paid:", f"NGN {paid:,.2f}"],
+        ["", "", "Balance Due:", f"NGN {(total - paid):,.2f}"],
     ]
     
     totals_table = Table(totals_data, colWidths=[2*inch, 2*inch, 1.5*inch, 1*inch])
@@ -4364,7 +4457,7 @@ def generate_report_pdf(title: str, data: dict, report_type: str) -> bytes:
                     item.get("product_name", "")[:30],
                     item.get("warehouse_name", "")[:15],
                     str(item.get("quantity", 0)),
-                    f"${item.get('value', 0):.2f}"
+                    f"NGN {item.get('value', 0):,.2f}"
                 ])
             
             table = Table(table_data, colWidths=[1*inch, 2.5*inch, 1.2*inch, 0.8*inch, 1*inch])
@@ -4381,16 +4474,16 @@ def generate_report_pdf(title: str, data: dict, report_type: str) -> bytes:
         
         # Summary
         elements.append(Spacer(1, 0.3*inch))
-        elements.append(Paragraph(f"<b>Total Inventory Value: ${data.get('total_inventory_value', 0):,.2f}</b>", 
+        elements.append(Paragraph(f"<b>Total Inventory Value: NGN {data.get('total_inventory_value', 0):,.2f}</b>", 
                                  ParagraphStyle('Summary', fontSize=14, alignment=TA_RIGHT)))
     
     elif report_type == "profit_loss":
         pl_data = [
-            ["Revenue", f"${data.get('revenue', {}).get('total_sales', 0):,.2f}"],
-            ["Cost of Goods Sold", f"-${data.get('cost_of_goods_sold', {}).get('total_cogs', 0):,.2f}"],
-            ["Gross Profit", f"${data.get('gross_profit', 0):,.2f}"],
-            ["Operating Expenses", f"-${data.get('operating_expenses', {}).get('total', 0):,.2f}"],
-            ["Net Profit", f"${data.get('net_profit', 0):,.2f}"],
+            ["Revenue", f"NGN {data.get('revenue', {}).get('total_sales', 0):,.2f}"],
+            ["Cost of Goods Sold", f"NGN -{data.get('cost_of_goods_sold', {}).get('total_cogs', 0):,.2f}"],
+            ["Gross Profit", f"NGN {data.get('gross_profit', 0):,.2f}"],
+            ["Operating Expenses", f"NGN -{data.get('operating_expenses', {}).get('total', 0):,.2f}"],
+            ["Net Profit", f"NGN {data.get('net_profit', 0):,.2f}"],
         ]
         
         table = Table(pl_data, colWidths=[4*inch, 2*inch])
@@ -4412,7 +4505,16 @@ def generate_report_pdf(title: str, data: dict, report_type: str) -> bytes:
 
 @api_router.get("/reports/stock-summary/pdf")
 async def get_stock_summary_pdf(warehouse_id: Optional[str] = None, user: User = Depends(get_current_user)):
-    """Generate stock summary report PDF"""
+    """Generate stock summary report PDF.
+
+    Restricted to SuperAdmin and General Manager only — this report exposes
+    company-wide inventory valuation, which lower roles must not see.
+    """
+    if user.role not in [UserRole.SUPER_ADMIN, UserRole.GENERAL_MANAGER]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only SuperAdmin and General Manager can view the Stock Summary report."
+        )
     # Get the data
     query = {}
     if warehouse_id:
