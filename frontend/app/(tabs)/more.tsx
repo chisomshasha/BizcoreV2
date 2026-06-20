@@ -401,15 +401,17 @@ export default function MoreScreen() {
         {/* Reports Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Reports</Text>
-          <ListItem
-            title="Stock Summary"
-            subtitle="View inventory valuation"
-            leftIcon="stats-chart-outline"
-            onPress={() => {
-              setShowReportsModal(true);
-              loadStockReport();
-            }}
-          />
+          {(isSuperAdmin || isGeneralManager) && (
+            <ListItem
+              title="Stock Summary"
+              subtitle="View inventory valuation"
+              leftIcon="stats-chart-outline"
+              onPress={() => {
+                setShowReportsModal(true);
+                loadStockReport();
+              }}
+            />
+          )}
           <ListItem
             title="Export Data"
             subtitle="Download reports as CSV"

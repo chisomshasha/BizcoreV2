@@ -98,40 +98,50 @@ export default function OrdersScreen() {
   };
 
   const addItemToOrder = () => {
-    setOrderForm({
-      ...orderForm,
-      items: [...orderForm.items, { product_id: '', quantity: '', unit_price: '' }],
-    });
+    setOrderForm((prev) => ({
+      ...prev,
+      items: [...prev.items, { product_id: '', quantity: '', unit_price: '' }],
+    }));
   };
 
   const removeItemFromOrder = (index: number) => {
-    const newItems = orderForm.items.filter((_, i) => i !== index);
-    setOrderForm({ ...orderForm, items: newItems });
+    setOrderForm((prev) => ({
+      ...prev,
+      items: prev.items.filter((_, i) => i !== index),
+    }));
   };
 
+  // Uses the functional form of setState so that multiple calls fired
+  // synchronously in the same event (e.g. setting product_id and unit_price
+  // back-to-back when a product chip is tapped) each operate on the latest
+  // state instead of a stale snapshot, which previously caused one of the
+  // updates to silently overwrite the other.
   const updateOrderItem = (index: number, field: string, value: string) => {
-    const newItems = [...orderForm.items];
-    newItems[index] = { ...newItems[index], [field]: value };
-    setOrderForm({ ...orderForm, items: newItems });
+    setOrderForm((prev) => {
+      const newItems = [...prev.items];
+      newItems[index] = { ...newItems[index], [field]: value };
+      return { ...prev, items: newItems };
+    });
+  };
+
+  // Updates multiple fields on the same item atomically in a single state
+  // update — used when selecting a product also needs to set its price.
+  const updateOrderItemFields = (index: number, fields: Record<string, string>) => {
+    setOrderForm((prev) => {
+      const newItems = [...prev.items];
+      newItems[index] = { ...newItems[index], ...fields };
+      return { ...prev, items: newItems };
+    });
   };
 
   const handleCreateOrder = async () => {
     try {
-      // FIXED: Better validation - parse numbers and require positive values
-      const validItems = orderForm.items
-        .map((item) => ({
-          product_id: item.product_id,
-          quantity: parseFloat(item.quantity || '0'),
-          unit_price: parseFloat(item.unit_price || '0'),
-        }))
-        .filter((item) => 
-          item.product_id && 
-          !isNaN(item.quantity) && item.quantity > 0 && 
-          !isNaN(item.unit_price) && item.unit_price > 0
-        );
+      const validItems = orderForm.items.filter(
+        (item) => item.product_id && item.quantity && item.unit_price
+      );
 
       if (validItems.length === 0) {
-        Alert.alert('Error', 'Please add at least one item with valid quantity and price');
+        Alert.alert('Error', 'Please add at least one item');
         return;
       }
 
@@ -151,11 +161,13 @@ export default function OrdersScreen() {
           notes: orderForm.notes,
           items: validItems.map((item) => ({
             product_id: item.product_id,
-            quantity: item.quantity,
-            unit_price: item.unit_price,
+            quantity: parseFloat(item.quantity),
+            unit_price: parseFloat(item.unit_price),
           })),
         });
       } else {
+        // Sales Orders are created automatically when a manager approves an agent
+        // quotation. Direct creation here is for manager/admin override only.
         if (!orderForm.sales_rep_id) {
           Alert.alert('Error', 'Please select a Sales Representative');
           return;
@@ -166,8 +178,8 @@ export default function OrdersScreen() {
           notes: orderForm.notes,
           items: validItems.map((item) => ({
             product_id: item.product_id,
-            quantity: item.quantity,
-            unit_price: item.unit_price,
+            quantity: parseFloat(item.quantity),
+            unit_price: parseFloat(item.unit_price),
           })),
         });
       }
@@ -229,6 +241,7 @@ export default function OrdersScreen() {
         default:         return [];
       }
     } else {
+      // Sales order workflow: pending_approval → approved → goods_released → delivered → paid
       switch (currentStatus) {
         case 'pending_approval': return ['approved', 'cancelled'];
         case 'approved':         return ['goods_released', 'cancelled'];
@@ -381,7 +394,7 @@ export default function OrdersScreen() {
         <View style={{ height: 100 }} />
       </ScrollView>
 
-      {/* Add Order Modal - (unchanged except validation fix above) */}
+      {/* Add Order Modal */}
       <Modal visible={showAddModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { paddingBottom: Math.max(insets.bottom, 20) }]}>
@@ -460,7 +473,7 @@ export default function OrdersScreen() {
                 ))}
               </View>
 
-              {/* Items Section */}
+              {/* Items */}
               <View style={styles.itemsHeader}>
                 <Text style={styles.inputLabel}>Items</Text>
                 <TouchableOpacity style={styles.addItemButton} onPress={addItemToOrder}>
@@ -488,12 +501,10 @@ export default function OrdersScreen() {
                               isSelected && styles.productChipActive,
                             ]}
                             onPress={() => {
-                              updateOrderItem(index, 'product_id', p.product_id);
-                              updateOrderItem(
-                                index,
-                                'unit_price',
-                                (activeTab === 'purchase' ? p.cost_price : p.selling_price).toString()
-                              );
+                              updateOrderItemFields(index, {
+                                product_id: p.product_id,
+                                unit_price: (activeTab === 'purchase' ? p.cost_price : p.selling_price).toString(),
+                              });
                             }}
                           >
                             {isSelected && (
@@ -644,6 +655,7 @@ export default function OrdersScreen() {
                   </View>
                 </View>
 
+                {/* Status Actions */}
                 {getNextStatus(selectedOrder.status).length > 0 && (
                   <>
                     <Text style={styles.sectionTitle}>Update Status</Text>
@@ -917,8 +929,8 @@ const styles = StyleSheet.create({
   },
   productChipTextActive: {
     color: Colors.text,
-    fontWeight: '700',
-    fontSize: 13,
+    fontWeight: '700',     // bold the selected product name
+    fontSize: 13,          // slightly larger to make the highlight pop
   },
   itemInputRow: {
     flexDirection: 'row',
