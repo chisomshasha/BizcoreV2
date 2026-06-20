@@ -18,9 +18,13 @@ import {
 } from '../src/components/ThemedComponents';
 import { formatCurrency } from '../src/config/clientConfig';
 import api from '../src/utils/api';
+import { useAuthStore } from '../src/store/authStore';
 
 export default function FinancialReportsScreen() {
   const router = useRouter();
+  const { user } = useAuthStore();
+  // Top echelon only — matches backend balance-sheet/trial-balance gates.
+  const canView = ['super_admin', 'general_manager', 'accountant'].includes(user?.role ?? '');
   
   const [activeTab, setActiveTab] = useState<'balance' | 'trial'>('balance');
   const [balanceSheet, setBalanceSheet] = useState<any>(null);
@@ -29,8 +33,12 @@ export default function FinancialReportsScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
+    if (!canView) {
+      router.back();
+      return;
+    }
     loadData();
-  }, []);
+  }, [canView]);
 
   const loadData = async () => {
     try {

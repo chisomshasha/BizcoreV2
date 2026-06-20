@@ -19,6 +19,7 @@ import {
 } from '../src/components/ThemedComponents';
 import { format, formatDistanceToNow } from 'date-fns';
 import api from '../src/utils/api';
+import { useAuthStore } from '../src/store/authStore';
 
 interface AuditLog {
   log_id: string;
@@ -34,15 +35,22 @@ interface AuditLog {
 
 export default function AuditLogsScreen() {
   const router = useRouter();
-  
+  const { user } = useAuthStore();
+  // Top echelon only — matches backend GET /audit-logs gate.
+  const canView = ['super_admin', 'general_manager', 'accountant'].includes(user?.role ?? '');
+
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [entityFilter, setEntityFilter] = useState<string>('all');
 
   useEffect(() => {
+    if (!canView) {
+      router.back();
+      return;
+    }
     loadData();
-  }, []);
+  }, [canView]);
 
   const loadData = async () => {
     try {

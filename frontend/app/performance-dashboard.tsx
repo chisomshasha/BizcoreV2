@@ -20,11 +20,15 @@ import {
 } from '../src/components/ThemedComponents';
 import { formatCurrency } from '../src/config/clientConfig';
 import api from '../src/utils/api';
+import { useAuthStore } from '../src/store/authStore';
 
 const { width } = Dimensions.get('window');
 
 export default function PerformanceDashboardScreen() {
   const router = useRouter();
+  const { user } = useAuthStore();
+  // Top echelon only — matches backend GET /reports/supplier-performance gate.
+  const canView = ['super_admin', 'general_manager', 'accountant'].includes(user?.role ?? '');
   
   const [activeTab, setActiveTab] = useState<'suppliers' | 'distributors'>('suppliers');
   const [supplierData, setSupplierData] = useState<any>(null);
@@ -33,14 +37,22 @@ export default function PerformanceDashboardScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
+    if (!canView) {
+      router.back();
+      return;
+    }
     loadData();
-  }, []);
+  }, [canView]);
 
   const loadData = async () => {
     try {
+      // NOTE: /reports/distributor-performance does not exist on the
+      // backend — this call 404s and distributorData stays null. This is
+      // a pre-existing gap unrelated to role-gating; the "Distributors"
+      // tab below will render its empty state until that endpoint is built.
       const [supRes, distRes] = await Promise.all([
         api.get('/reports/supplier-performance'),
-        api.get('/reports/distributor-performance'),
+        api.get('/reports/distributor-performance').catch(() => ({ data: null })),
       ]);
       setSupplierData(supRes.data);
       setDistributorData(distRes.data);
