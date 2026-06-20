@@ -22,6 +22,7 @@ import {
   EmptyState,
 } from '../src/components/ThemedComponents';
 import { useAppStore } from '../src/store/appStore';
+import { useAuthStore } from '../src/store/authStore';
 import api from '../src/utils/api';
 
 interface BOM {
@@ -43,6 +44,11 @@ interface BOM {
 export default function BOMScreen() {
   const router = useRouter();
   const { products, fetchProducts } = useAppStore();
+  const { user } = useAuthStore();
+  // BOM creation and production runs are write actions — matches backend
+  // bom:create/update, which only SuperAdmin, General Manager, and
+  // Warehouse Manager hold. Purchase Clerk/Accountant/Viewer are read-only.
+  const canManageBOM = ['super_admin', 'general_manager', 'warehouse_manager'].includes(user?.role ?? '');
   
   const [boms, setBoms] = useState<BOM[]>([]);
   const [loading, setLoading] = useState(true);
@@ -170,9 +176,13 @@ export default function BOMScreen() {
           <Ionicons name="arrow-back" size={24} color={Colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>Bill of Materials</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => setShowAddModal(true)}>
-          <Ionicons name="add" size={24} color={Colors.text} />
-        </TouchableOpacity>
+        {canManageBOM ? (
+          <TouchableOpacity style={styles.addButton} onPress={() => setShowAddModal(true)}>
+            <Ionicons name="add" size={24} color={Colors.text} />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </View>
 
       <ScrollView
@@ -221,17 +231,19 @@ export default function BOMScreen() {
                   <Ionicons name="layers-outline" size={14} color={Colors.textMuted} />
                   <Text style={styles.bomDetailText}>{bom.components.length} components</Text>
                 </View>
-                <TouchableOpacity
-                  style={styles.produceBtn}
-                  onPress={(e) => {
-                    e.stopPropagation();
-                    setSelectedBOM(bom);
-                    setShowProduceModal(true);
-                  }}
-                >
-                  <Ionicons name="play-circle" size={16} color={Colors.success} />
-                  <Text style={styles.produceBtnText}>Produce</Text>
-                </TouchableOpacity>
+                {canManageBOM && (
+                  <TouchableOpacity
+                    style={styles.produceBtn}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      setSelectedBOM(bom);
+                      setShowProduceModal(true);
+                    }}
+                  >
+                    <Ionicons name="play-circle" size={16} color={Colors.success} />
+                    <Text style={styles.produceBtnText}>Produce</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </TouchableOpacity>
           ))
@@ -397,15 +409,17 @@ export default function BOMScreen() {
                 </Card>
               )}
 
-              <Button
-                title="Start Production"
-                variant="primary"
-                onPress={() => {
-                  setShowDetailModal(false);
-                  setShowProduceModal(true);
-                }}
-                style={{ marginTop: 20 }}
-              />
+              {canManageBOM && (
+                <Button
+                  title="Start Production"
+                  variant="primary"
+                  onPress={() => {
+                    setShowDetailModal(false);
+                    setShowProduceModal(true);
+                  }}
+                  style={{ marginTop: 20 }}
+                />
+              )}
 
               <View style={{ height: 40 }} />
             </ScrollView>

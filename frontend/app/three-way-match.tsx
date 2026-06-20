@@ -21,6 +21,7 @@ import {
   EmptyState,
 } from '../src/components/ThemedComponents';
 import { formatCurrency } from '../src/config/clientConfig';
+import { useAuthStore } from '../src/store/authStore';
 import { format } from 'date-fns';
 import api from '../src/utils/api';
 
@@ -48,6 +49,10 @@ interface ThreeWayMatch {
 
 export default function ThreeWayMatchScreen() {
   const router = useRouter();
+  const { user } = useAuthStore();
+  // Matches backend three_way_match:create/update — SuperAdmin, General
+  // Manager, Warehouse Manager, Purchase Clerk (their verification step).
+  const canManageMatch = ['super_admin', 'general_manager', 'warehouse_manager', 'purchase_clerk'].includes(user?.role ?? '');
   
   const [matches, setMatches] = useState<ThreeWayMatch[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
@@ -180,9 +185,13 @@ export default function ThreeWayMatchScreen() {
           <Ionicons name="arrow-back" size={24} color={Colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>3-Way Matching</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => setShowCreateModal(true)}>
-          <Ionicons name="add" size={24} color={Colors.text} />
-        </TouchableOpacity>
+        {canManageMatch ? (
+          <TouchableOpacity style={styles.addButton} onPress={() => setShowCreateModal(true)}>
+            <Ionicons name="add" size={24} color={Colors.text} />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </View>
 
       {/* Info Banner */}
@@ -386,7 +395,7 @@ export default function ThreeWayMatchScreen() {
                 </>
               )}
 
-              {selectedMatch.status !== 'full_match' && !selectedMatch.approved_by && (
+              {selectedMatch.status !== 'full_match' && !selectedMatch.approved_by && canManageMatch && (
                 <Button
                   title="Approve for Payment"
                   onPress={() => handleApprove(selectedMatch.match_id)}

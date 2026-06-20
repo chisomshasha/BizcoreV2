@@ -22,6 +22,7 @@ import {
   EmptyState,
 } from '../src/components/ThemedComponents';
 import { formatCurrency } from '../src/config/clientConfig';
+import { useAuthStore } from '../src/store/authStore';
 import { format } from 'date-fns';
 import api from '../src/utils/api';
 
@@ -44,6 +45,10 @@ interface GRN {
 
 export default function GRNScreen() {
   const router = useRouter();
+  const { user } = useAuthStore();
+  // Matches backend grn:create — SuperAdmin, General Manager, Warehouse
+  // Manager, Purchase Clerk (they receive goods against POs).
+  const canCreateGRN = ['super_admin', 'general_manager', 'warehouse_manager', 'purchase_clerk'].includes(user?.role ?? '');
   
   const [grns, setGrns] = useState<GRN[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<any[]>([]);
@@ -188,9 +193,13 @@ export default function GRNScreen() {
           <Ionicons name="arrow-back" size={24} color={Colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>Goods Receipt Notes</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => setShowCreateModal(true)}>
-          <Ionicons name="add" size={24} color={Colors.text} />
-        </TouchableOpacity>
+        {canCreateGRN ? (
+          <TouchableOpacity style={styles.addButton} onPress={() => setShowCreateModal(true)}>
+            <Ionicons name="add" size={24} color={Colors.text} />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterRow}>
@@ -389,7 +398,7 @@ export default function GRNScreen() {
                 </Card>
               ))}
 
-              {selectedGRN.status === 'pending' && (
+              {selectedGRN.status === 'pending' && canCreateGRN && (
                 <Button
                   title="Mark as Received"
                   onPress={() => handleUpdateStatus(selectedGRN.grn_id, 'received')}

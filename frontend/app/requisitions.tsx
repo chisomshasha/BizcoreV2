@@ -22,6 +22,7 @@ import {
   EmptyState,
 } from '../src/components/ThemedComponents';
 import { useAppStore } from '../src/store/appStore';
+import { useAuthStore } from '../src/store/authStore';
 import { formatCurrency } from '../src/config/clientConfig';
 import { format } from 'date-fns';
 import api from '../src/utils/api';
@@ -48,6 +49,14 @@ interface Requisition {
 export default function RequisitionsScreen() {
   const router = useRouter();
   const { products, suppliers, warehouses, fetchProducts, fetchSuppliers, fetchWarehouses } = useAppStore();
+  const { user } = useAuthStore();
+  // Approve/Reject requisitions — matches backend hard gate: SuperAdmin,
+  // General Manager, Warehouse Manager only (not Accountant, not the
+  // Purchase Clerk who created it).
+  const canApproveReq = ['super_admin', 'general_manager', 'warehouse_manager'].includes(user?.role ?? '');
+  // Convert an approved requisition into a real Purchase Order — matches
+  // backend purchase_orders:create permission.
+  const canConvertToPO = ['super_admin', 'general_manager', 'warehouse_manager', 'purchase_clerk'].includes(user?.role ?? '');
   
   const [requisitions, setRequisitions] = useState<Requisition[]>([]);
   const [loading, setLoading] = useState(true);
@@ -227,6 +236,8 @@ export default function RequisitionsScreen() {
 
   if (loading) return <LoadingScreen />;
 
+  const canCreateRequisition = ['super_admin', 'general_manager', 'warehouse_manager', 'purchase_clerk'].includes(user?.role ?? '');
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
@@ -234,9 +245,13 @@ export default function RequisitionsScreen() {
           <Ionicons name="arrow-back" size={24} color={Colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>Purchase Requisitions</Text>
-        <TouchableOpacity style={styles.addButton} onPress={() => setShowAddModal(true)}>
-          <Ionicons name="add" size={24} color={Colors.text} />
-        </TouchableOpacity>
+        {canCreateRequisition ? (
+          <TouchableOpacity style={styles.addButton} onPress={() => setShowAddModal(true)}>
+            <Ionicons name="add" size={24} color={Colors.text} />
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 40 }} />
+        )}
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterRow}>
@@ -426,13 +441,13 @@ export default function RequisitionsScreen() {
               {selectedReq.status === 'draft' && (
                 <Button title="Submit for Approval" onPress={() => handleSubmit(selectedReq.requisition_id)} style={{ marginTop: 16 }} />
               )}
-              {selectedReq.status === 'pending' && (
+              {selectedReq.status === 'pending' && canApproveReq && (
                 <View style={styles.actionsRow}>
                   <Button title="Approve" variant="primary" onPress={() => handleApprove(selectedReq.requisition_id)} style={{ flex: 1 }} />
                   <Button title="Reject" variant="secondary" onPress={() => handleReject(selectedReq.requisition_id)} style={{ flex: 1 }} />
                 </View>
               )}
-              {selectedReq.status === 'approved' && (
+              {selectedReq.status === 'approved' && canConvertToPO && (
                 <Button
                   title="Convert to PO"
                   variant="primary"

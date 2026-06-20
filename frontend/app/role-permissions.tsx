@@ -116,8 +116,14 @@ function permsEqual(a: Record<string, CRUDPerm>, b: Record<string, CRUDPerm>): b
 export default function RolePermissionsScreen() {
   const router = useRouter();
   const { isSuperAdmin, isGeneralManager, isAccountant } = useAuthStore();
-  // Accessible to Super Admin, General Manager, and Accountant.
-  const canManage = isSuperAdmin || isGeneralManager || isAccountant;
+  // Viewing the matrix: Super Admin, General Manager, and Accountant
+  // (matches GET /admin/role-permissions).
+  const canView = isSuperAdmin || isGeneralManager || isAccountant;
+  // Editing the matrix (toggle switches, Save, Reset): Super Admin and
+  // General Manager ONLY. This is the master switch for the entire
+  // authorization system — Accountant must not be able to write here,
+  // even though they can view it (matches PUT/POST /admin/role-permissions).
+  const canEdit = isSuperAdmin || isGeneralManager;
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -132,13 +138,13 @@ export default function RolePermissionsScreen() {
   // Saving state per role
   const [saving, setSaving] = useState<Record<string, boolean>>({});
 
-  // Redirect non-admins
+  // Redirect users who can't even view this screen
   useEffect(() => {
-    if (!canManage) {
-      Alert.alert('Access Denied', 'Only Super Admin, General Manager, or Accountant can manage role permissions.');
+    if (!canView) {
+      Alert.alert('Access Denied', 'Only Super Admin, General Manager, or Accountant can view role permissions.');
       router.back();
     }
-  }, [canManage]);
+  }, [canView]);
 
   const loadMatrix = useCallback(async () => {
     try {
@@ -362,7 +368,7 @@ export default function RolePermissionsScreen() {
                             {matrix.module_labels[mod] || mod}
                           </Text>
                           {OPS.map(op => {
-                            const locked = isAccountant && op === 'read';
+                            const locked = !canEdit;
                             const active = perm[op];
                             return (
                               <TouchableOpacity
@@ -384,49 +390,53 @@ export default function RolePermissionsScreen() {
                               </TouchableOpacity>
                             );
                           })}
-                          {/* Grant / revoke entire row */}
-                          <TouchableOpacity
-                            style={styles.rowToggleBtn}
-                            onPress={() => toggleRow(role, mod, !rowGranted)}
-                          >
-                            <Ionicons
-                              name={rowGranted ? 'close-circle-outline' : 'add-circle-outline'}
-                              size={16}
-                              color={rowGranted ? Colors.danger : Colors.success}
-                            />
-                          </TouchableOpacity>
+                          {/* Grant / revoke entire row — edit-capable roles only */}
+                          {canEdit && (
+                            <TouchableOpacity
+                              style={styles.rowToggleBtn}
+                              onPress={() => toggleRow(role, mod, !rowGranted)}
+                            >
+                              <Ionicons
+                                name={rowGranted ? 'close-circle-outline' : 'add-circle-outline'}
+                                size={16}
+                                color={rowGranted ? Colors.danger : Colors.success}
+                              />
+                            </TouchableOpacity>
+                          )}
                         </View>
                       );
                     })}
 
-                    {/* Action buttons */}
-                    <View style={styles.actionRow}>
-                      <TouchableOpacity
-                        style={[styles.resetBtn]}
-                        onPress={() => resetRole(role)}
-                        disabled={isSavingNow}
-                      >
-                        <Ionicons name="refresh-outline" size={14} color={Colors.textMuted} />
-                        <Text style={styles.resetBtnText}>Reset Defaults</Text>
-                      </TouchableOpacity>
+                    {/* Action buttons — edit-capable roles only */}
+                    {canEdit && (
+                      <View style={styles.actionRow}>
+                        <TouchableOpacity
+                          style={[styles.resetBtn]}
+                          onPress={() => resetRole(role)}
+                          disabled={isSavingNow}
+                        >
+                          <Ionicons name="refresh-outline" size={14} color={Colors.textMuted} />
+                          <Text style={styles.resetBtnText}>Reset Defaults</Text>
+                        </TouchableOpacity>
 
-                      <TouchableOpacity
-                        style={[styles.saveBtn, !isDirty && styles.saveBtnDisabled]}
-                        onPress={() => saveRole(role)}
-                        disabled={!isDirty || isSavingNow}
-                      >
-                        {isSavingNow ? (
-                          <ActivityIndicator size="small" color={Colors.text} />
-                        ) : (
-                          <>
-                            <Ionicons name="checkmark-outline" size={14} color={Colors.text} />
-                            <Text style={styles.saveBtnText}>
-                              {isDirty ? 'Save Changes' : 'Saved'}
-                            </Text>
-                          </>
-                        )}
-                      </TouchableOpacity>
-                    </View>
+                        <TouchableOpacity
+                          style={[styles.saveBtn, !isDirty && styles.saveBtnDisabled]}
+                          onPress={() => saveRole(role)}
+                          disabled={!isDirty || isSavingNow}
+                        >
+                          {isSavingNow ? (
+                            <ActivityIndicator size="small" color={Colors.text} />
+                          ) : (
+                            <>
+                              <Ionicons name="checkmark-outline" size={14} color={Colors.text} />
+                              <Text style={styles.saveBtnText}>
+                                {isDirty ? 'Save Changes' : 'Saved'}
+                              </Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    )}
                   </View>
                 )}
               </View>
