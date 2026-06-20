@@ -15,6 +15,13 @@ const STATUS_COLOR: Record<AgentQuotationStatus, string> = {
 
 export default function QuotationsScreen() {
   const { user, isAgent, isApprover, isCrossWarehouse, warehouseId } = useAuthStore();
+  // Quotation approval is restricted to SuperAdmin, General Manager, and
+  // Warehouse Manager only — narrower than the general isApprover flag,
+  // which also includes Accountant (used elsewhere for warehouse transfers
+  // and debt-ceiling management, but not quotation approval).
+  const canApproveQuotation = user?.role === 'super_admin'
+    || user?.role === 'general_manager'
+    || user?.role === 'warehouse_manager';
   const [quotations, setQuotations] = useState<AgentQuotation[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -179,8 +186,8 @@ export default function QuotationsScreen() {
               <Text style={s.remarks}>Remarks: {q.approval_remarks}</Text>
             ) : null}
 
-            {/* Approve/Reject buttons for pending */}
-            {isApprover && q.status === 'pending' && (
+            {/* Approve/Reject buttons for pending — SuperAdmin/GM/Warehouse Manager only */}
+            {canApproveQuotation && q.status === 'pending' && (
               <View style={s.actionRow}>
                 <TouchableOpacity
                   style={[s.actionBtn, s.approveBtn]}
