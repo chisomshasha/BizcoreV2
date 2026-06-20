@@ -8,7 +8,7 @@ import { useAuthStore } from '../../src/store/authStore';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
-  const { isAgent, isClerk, isApprover, isSuperAdmin, isGeneralManager,
+  const { isAgent, isClerk, isPurchaseClerk, isApprover, isSuperAdmin, isGeneralManager,
           isWarehouseManager, isAccountant } = useAuthStore();
 
   const bottomPadding = Platform.OS === 'android'
@@ -20,8 +20,11 @@ export default function TabLayout() {
   // Sales reps (agents) only see Home, Orders, and their Ledger (via More)
   const agentOnly = isAgent && !isApprover && !isSuperAdmin && !isGeneralManager;
 
-  // Internal warehouse staff: Clerks + Warehouse Managers
-  const isWarehouseStaff = isClerk || isWarehouseManager;
+  // Roles that do NOT get Finance or Reports tabs:
+  // - Sales Rep (field agents — no financial overview)
+  // - Sales Clerk (fulfillment — no financial overview)
+  // - Purchase Clerk (procurement — no financial overview; backend already guards content)
+  const hideFinanceReports = agentOnly || isClerk || isPurchaseClerk;
 
   return (
     <Tabs
@@ -46,7 +49,7 @@ export default function TabLayout() {
         },
       }}
     >
-      {/* Home — everyone */}
+      {/* Home — everyone (content role-gated inside index.tsx) */}
       <Tabs.Screen
         name="index"
         options={{
@@ -80,26 +83,24 @@ export default function TabLayout() {
         }}
       />
 
-      {/* Partners tab — removed (Suppliers live inside the app; this tab is no longer used) */}
-
-      {/* Finance — managers, accountants, general managers, super admin only */}
+      {/* Finance — top echelon + Warehouse Manager only */}
       <Tabs.Screen
         name="finance"
         options={{
           title: 'Finance',
-          href: (agentOnly || isClerk) ? null : undefined,
+          href: hideFinanceReports ? null : undefined,
           tabBarIcon: ({ focused, color }) => (
             <Ionicons name={focused ? 'wallet' : 'wallet-outline'} size={22} color={color} />
           ),
         }}
       />
 
-      {/* Reports — hidden from agents and clerks */}
+      {/* Reports — top echelon + Warehouse Manager only */}
       <Tabs.Screen
         name="reports"
         options={{
           title: 'Reports',
-          href: (agentOnly || isClerk) ? null : undefined,
+          href: hideFinanceReports ? null : undefined,
           tabBarIcon: ({ focused, color }) => (
             <Ionicons name={focused ? 'stats-chart' : 'stats-chart-outline'} size={22} color={color} />
           ),

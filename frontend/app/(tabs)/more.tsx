@@ -36,12 +36,18 @@ export default function MoreScreen() {
   const router = useRouter();
   const { user, logout } = useAuthStore();
   const role = user?.role ?? '';
-  const isSuperAdmin      = role === 'super_admin';
-  const isGeneralManager  = role === 'general_manager';
-  const isWarehouseManager = role === 'warehouse_manager';
-  const isApprover        = ['super_admin','general_manager','warehouse_manager','accountant'].includes(role);
-  const isAgent           = role === 'sales_rep';
-  const isClerk           = role === 'sales_clerk';
+  const isSuperAdmin        = role === 'super_admin';
+  const isGeneralManager    = role === 'general_manager';
+  const isWarehouseManager  = role === 'warehouse_manager';
+  const isAccountant        = role === 'accountant';
+  // isApprover here is the broader read/transfer/debt-ceiling set (Accountant included)
+  const isApprover          = ['super_admin','general_manager','warehouse_manager','accountant'].includes(role);
+  const isAgent             = role === 'sales_rep';
+  const isClerk             = role === 'sales_clerk';
+  const isSalesClerk        = role === 'sales_clerk';
+  const isPurchaseClerk     = role === 'purchase_clerk';
+  // Top echelon: cross-warehouse read access including company-wide reports
+  const isTopEchelon        = isSuperAdmin || isGeneralManager || isAccountant;
   const { warehouses, fetchWarehouses, createWarehouse, deleteWarehouse } = useAppStore();
   const [refreshing, setRefreshing] = useState(false);
   const [showWarehouseModal, setShowWarehouseModal] = useState(false);
@@ -333,12 +339,18 @@ export default function MoreScreen() {
         {/* Sales & Purchases */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Sales & Purchases</Text>
-          <ListItem
-            title="Quotations"
-            subtitle={isAgent ? "Create and track your quotations" : "Manage agent quotations"}
-            leftIcon="document-text-outline"
-            onPress={() => router.push('/quotations')}
-          />
+
+          {/* Quotations — Sales Rep (create) + SuperAdmin/GM/Warehouse Manager (approve) */}
+          {(isAgent || isSuperAdmin || isGeneralManager || isWarehouseManager) && (
+            <ListItem
+              title="Quotations"
+              subtitle={isAgent ? "Create and track your quotations" : "Approve agent quotations"}
+              leftIcon="document-text-outline"
+              onPress={() => router.push('/quotations')}
+            />
+          )}
+
+          {/* Sales Rep: My Ledger */}
           {isAgent && (
             <ListItem
               title="My Ledger"
@@ -347,40 +359,71 @@ export default function MoreScreen() {
               onPress={() => router.push('/agent-ledger')}
             />
           )}
-          <ListItem
-            title="Delivery Notes"
-            subtitle="Track shipments"
-            leftIcon="car-outline"
-            onPress={() => router.push('/delivery-notes')}
-          />
-          <ListItem
-            title="Bill of Materials"
-            subtitle="Production recipes"
-            leftIcon="construct-outline"
-            onPress={() => router.push('/bom')}
-          />
-          <ListItem
-            title="Purchase Requisitions"
-            subtitle="Request materials with approval"
-            leftIcon="document-attach-outline"
-            onPress={() => router.push('/requisitions')}
-          />
-          <ListItem
-            title="Goods Receipt (GRN)"
-            subtitle="Receive and verify goods"
-            leftIcon="receipt-outline"
-            onPress={() => router.push('/grn')}
-          />
-          <ListItem
-            title="3-Way Matching"
-            subtitle="PO-GRN-Invoice verification"
-            leftIcon="git-compare-outline"
-            onPress={() => router.push('/three-way-match')}
-          />
+
+          {/* Dispatch — Sales Clerk (releases goods), Warehouse Manager, SuperAdmin/GM */}
+          {/* Sales Rep sees their own "Awaiting My Confirmation" tab inside dispatch too */}
+          {(isSalesClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAgent) && (
+            <ListItem
+              title="Dispatch"
+              subtitle={isAgent ? "Confirm receipt of released goods" : "Release goods to Sales Reps"}
+              leftIcon="car-sport-outline"
+              onPress={() => router.push('/dispatch')}
+            />
+          )}
+
+          {/* Delivery Notes — Sales Clerk / Warehouse Manager / top echelon */}
+          {(isSalesClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAccountant) && (
+            <ListItem
+              title="Delivery Notes"
+              subtitle="Track shipments"
+              leftIcon="car-outline"
+              onPress={() => router.push('/delivery-notes')}
+            />
+          )}
+
+          {/* Bill of Materials — procurement/management only */}
+          {(isPurchaseClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAccountant) && (
+            <ListItem
+              title="Bill of Materials"
+              subtitle="Production recipes"
+              leftIcon="construct-outline"
+              onPress={() => router.push('/bom')}
+            />
+          )}
+
+          {/* Purchase Requisitions — Purchase Clerk (create) + approvers (read/approve) */}
+          {(isPurchaseClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAccountant) && (
+            <ListItem
+              title="Purchase Requisitions"
+              subtitle={isPurchaseClerk ? "Request materials with approval" : "Review and approve requisitions"}
+              leftIcon="document-attach-outline"
+              onPress={() => router.push('/requisitions')}
+            />
+          )}
+
+          {/* GRN — Purchase Clerk (receive goods) + Warehouse Manager / top echelon */}
+          {(isPurchaseClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAccountant) && (
+            <ListItem
+              title="Goods Receipt (GRN)"
+              subtitle="Receive and verify goods"
+              leftIcon="receipt-outline"
+              onPress={() => router.push('/grn')}
+            />
+          )}
+
+          {/* 3-Way Matching — Purchase Clerk + management */}
+          {(isPurchaseClerk || isWarehouseManager || isSuperAdmin || isGeneralManager || isAccountant) && (
+            <ListItem
+              title="3-Way Matching"
+              subtitle="PO-GRN-Invoice verification"
+              leftIcon="git-compare-outline"
+              onPress={() => router.push('/three-way-match')}
+            />
+          )}
         </View>
 
-        {/* Financial Reports — managers and accountants only */}
-        {!isAgent && !isClerk && (
+        {/* Financial Reports — top echelon + Warehouse Manager only */}
+        {(isTopEchelon || isWarehouseManager) && !isAgent && !isSalesClerk && !isPurchaseClerk && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Financial Reports</Text>
             <ListItem
@@ -401,7 +444,7 @@ export default function MoreScreen() {
         {/* Reports Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Reports</Text>
-          {(isSuperAdmin || isGeneralManager) && (
+          {(isSuperAdmin || isGeneralManager || isAccountant) && (
             <ListItem
               title="Stock Summary"
               subtitle="View inventory valuation"

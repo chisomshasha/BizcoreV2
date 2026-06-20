@@ -381,25 +381,26 @@ const ROLE_HOME_CONFIG: Record<string, { greeting: string; links: RoleHomeLink[]
   sales_rep: {
     greeting: 'Create quotations, track your orders, and manage your ledger.',
     links: [
-      { title: 'Quotations', subtitle: 'Create and track your quotations', icon: 'document-text-outline', route: '/quotations' },
-      { title: 'My Orders', subtitle: 'View your sales orders', icon: 'cart-outline', route: '/(tabs)/orders' },
-      { title: 'My Ledger', subtitle: 'Goods released, payments & balance', icon: 'wallet-outline', route: '/agent-ledger' },
+      { title: 'Quotations', subtitle: 'Create and submit quotations for approval', icon: 'document-text-outline', route: '/quotations' },
+      { title: 'My Orders', subtitle: 'View your released sales orders', icon: 'cart-outline', route: '/(tabs)/orders' },
+      { title: 'Dispatch', subtitle: 'Confirm receipt of released goods', icon: 'car-sport-outline', route: '/dispatch' },
+      { title: 'My Ledger', subtitle: 'Goods in custody, payments & balance', icon: 'wallet-outline', route: '/agent-ledger' },
     ],
   },
   sales_clerk: {
-    greeting: 'Process orders and manage dispatch.',
+    greeting: 'Process orders, release goods to agents, and track delivery.',
     links: [
-      { title: 'Orders', subtitle: 'Process sales and purchase orders', icon: 'cart-outline', route: '/(tabs)/orders' },
+      { title: 'Dispatch', subtitle: 'Release approved goods to Sales Reps', icon: 'car-sport-outline', route: '/dispatch' },
+      { title: 'Orders', subtitle: 'Process and manage sales orders', icon: 'cart-outline', route: '/(tabs)/orders' },
       { title: 'Delivery Notes', subtitle: 'Track shipments', icon: 'car-outline', route: '/delivery-notes' },
-      { title: 'Goods Receipt (GRN)', subtitle: 'Receive and verify goods', icon: 'receipt-outline', route: '/grn' },
     ],
   },
   purchase_clerk: {
-    greeting: 'Manage procurement and supplier orders.',
+    greeting: 'Manage procurement — buy materials and finished goods for the business before they are stocked into inventory.',
     links: [
       { title: 'Orders', subtitle: 'Manage purchase orders', icon: 'cart-outline', route: '/(tabs)/orders' },
       { title: 'Purchase Requisitions', subtitle: 'Request materials with approval', icon: 'document-attach-outline', route: '/requisitions' },
-      { title: 'Goods Receipt (GRN)', subtitle: 'Receive and verify goods', icon: 'receipt-outline', route: '/grn' },
+      { title: 'Goods Receipt (GRN)', subtitle: 'Receive and verify incoming goods', icon: 'receipt-outline', route: '/grn' },
       { title: '3-Way Matching', subtitle: 'PO-GRN-Invoice verification', icon: 'git-compare-outline', route: '/three-way-match' },
     ],
   },
