@@ -14,7 +14,7 @@ import re
 import hashlib
 import hmac
 from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, ValidationError
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -985,7 +985,23 @@ async def get_current_user(authorization: str = Header(...)) -> User:
     if not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="Account disabled")
 
-    return User(**user)
+    try:
+        return User(**user)
+    except ValidationError as e:
+        # A stored document has a role (or other field) that no longer
+        # matches the current schema — most commonly a legacy role value
+        # left over from before a role was renamed/removed (e.g. the old
+        # "sales_executive" role, now "sales_rep"). Fail with a clear,
+        # actionable error instead of a bare 500.
+        logging.error(f"User {user.get('user_id')} failed schema validation: {e}")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Your account record has an invalid or outdated 'role' value "
+                "and can't be loaded. Please ask a Super Admin to open Users, "
+                "edit your account, and re-select your role."
+            ),
+        )
 
 async def get_optional_user(request: Request) -> Optional[User]:
     """Get current user if authenticated, None otherwise"""
@@ -1710,7 +1726,7 @@ async def logout(request: Request, response: Response,
 # USER MANAGEMENT ENDPOINTS
 # ========================
 
-@api_router.get("/users", response_model=List[User])
+@api_router.get("/users")
 @limiter.limit("100/minute")
 async def get_users(request: Request, user: User = Depends(get_current_user)):
     """Get all users (admin only). Rate limited: 100/minute."""
@@ -1724,8 +1740,23 @@ async def get_users(request: Request, user: User = Depends(get_current_user)):
     if user.role in [UserRole.WAREHOUSE_MANAGER] and user.warehouse_id:
         query["warehouse_id"] = sanitize_string(user.warehouse_id)
 
-    users = await db.users.find(query, {"_id": 0}).to_list(1000)
-    return [User(**u) for u in users]
+    raw_users = await db.users.find(query, {"_id": 0}).to_list(1000)
+    result = []
+    for u in raw_users:
+        try:
+            result.append(User(**u))
+        except ValidationError as e:
+            # Don't let one legacy/corrupt record (e.g. an old role value
+            # like "sales_executive" that no longer exists) take down the
+            # whole Users list for every admin. Surface it as a flagged
+            # raw entry instead so it's still visible and fixable in the UI.
+            logging.error(f"User {u.get('user_id')} failed schema validation in get_users: {e}")
+            result.append({
+                **u,
+                "_invalid_role": True,
+                "_validation_error": str(e),
+            })
+    return result
 
 @api_router.post("/users/create")
 @limiter.limit("20/minute")
@@ -1877,7 +1908,18 @@ async def update_user(request: Request, user_id: str, update: UserUpdate, user: 
     updated_user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     if not updated_user:
         raise HTTPException(status_code=404, detail="User not found")
-    return User(**updated_user)
+    try:
+        return User(**updated_user)
+    except ValidationError as e:
+        logging.error(f"User {user_id} failed schema validation after update: {e}")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The update was saved, but this user record still has an "
+                "invalid field (likely 'role'). Please edit the user again "
+                "and select a valid role from the list."
+            ),
+        )
 
 
 @api_router.delete("/users/{user_id}")
@@ -6697,15 +6739,6 @@ async def get_warehouse_performance(user: User = Depends(get_current_user)):
     return {"warehouses": performance}
 
 # ========================
-# HEALTH CHECK
-# ========================
-
-@api_router.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-# ========================
 # PERMISSION MANAGEMENT ENDPOINTS  (Super Admin only)
 # ========================
 
@@ -6892,22 +6925,6 @@ async def security_health_check():
     }
 
 # ========================
-# HEALTH CHECK
-# ========================
-
-@api_router.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-
-# ========================
-# INCLUDE ROUTER
-# ========================
-
-app.include_router(api_router)
-
-# ========================
 # MIDDLEWARE SETUP
 # Note: Starlette middleware runs in LIFO order.
 # Execution order on REQUEST:  RequestValidation → SecurityHeaders → TrustedHost → HTTPS → CORS
@@ -6971,7 +6988,23 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.on_event("startup")
 async def startup_db_client():
-    """Initialize database indexes"""
+    """Verify the database connection, then initialize indexes."""
+    try:
+        # A cheap, fast way to confirm the configured MONGO_URL is actually
+        # reachable before doing anything else — if this fails, the error
+        # below will say so clearly instead of failing deep inside an
+        # index-creation call with a confusing stack trace.
+        await client.admin.command("ping")
+        logger.info(f"Connected to MongoDB — database: '{db.name}'")
+    except Exception as e:
+        logger.error(
+            f"FAILED to connect to MongoDB using the configured MONGO_URL. "
+            f"Check that the connection string is correct and that this service "
+            f"can reach the database over the network (e.g. same Railway project, "
+            f"correct internal hostname). Underlying error: {e}"
+        )
+        raise
+
     await db.products.create_index("sku", unique=True)
     await db.products.create_index("barcode")
     await db.products.create_index("category")
